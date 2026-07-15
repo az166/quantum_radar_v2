@@ -4,13 +4,12 @@ from threading import Thread, Lock
 from flask import Flask, render_template, jsonify, request
 import httpx
 import asyncio
-import numpy as np  # <-- Memperbaiki NameError 'np'
+import numpy as np
 
 from config import CACHE_TTL_SECONDS
 from services.binance_service import (
     check_bitcoin_circuit_breaker, get_combined_tickers_data_async
 )
-# Tetap gunakan ini karena file Anda ada di dalam folder services/
 from services.engine import process_single_coin_pipeline, hitung_matriks_atr_dinamis
 from services.telegram_service import send_telegram_in_worker_thread
 
@@ -65,7 +64,7 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
     ) as brass_client:
         try:
             semaphore = asyncio.Semaphore(4)  
-            
+
             # 1. Update BTC Circuit Breaker
             btc_status, btc_returns = await check_bitcoin_circuit_breaker(brass_client)
             with state.lock:
@@ -144,7 +143,7 @@ def get_data():
     req = request.json or {}
     device_id = req.get("device_id", "default_guest_device")
 
-    # 1. Sinkronisasi Portofolio Cache (Logika Asli Anda)
+    # 1. Sinkronisasi Portofolio Cache
     try:
         with state.lock:
             state.portfolio_dynamics[device_id] = req.get("portfolio", {})
@@ -156,73 +155,7 @@ def get_data():
     except Exception as e:
         print(f"Failed to synchronize device dynamic cache: {e}")
 
-    # 2. Kalkulasi ATR Dinamis Berdasarkan Tingkat Risiko BTC Baru
-    try:
-        # Ekstrak status BTC global dari state aplikasi
-        btc_status = state.btc_status if hasattr(state, 'btc_status') else {}
-        is_btc_safe = btc_status.get("is_safe", True)
-        btc_reason = str(btc_status.get("reason", "")).upper()
-        
-        btc_returns_snapshot = state.get_btc_returns() if hasattr(state, 'get_btc_returns') else []
-        avg_btc_return = np.mean(btc_returns_snapshot) if btc_returns_snapshot else 0.0
-
-        # Konversi status ke Integer Level Risiko (1-4) sesuai arsitektur engine.py baru
-        if not is_btc_safe and ("CRASH" in btc_reason or "CAPITULATION" in btc_reason or avg_btc_return < -0.04):
-            btc_risk_level = 4
-        elif not is_btc_safe or "BREAKDOWN" in btc_reason or avg_btc_return < -0.02:
-            btc_risk_level = 3
-        elif "SQUEEZE" in btc_reason or "CONSOLIDATION" in btc_reason or -0.01 <= avg_btc_return < 0.01:
-            btc_risk_level = 2
-        else:
-            btc_risk_level = 1
-
-        # Ambil payload item data koin dari request klien
-        # Sesuaikan dengan format data yang dikirim oleh client frontend Anda
-        items = req.get("items", [])
-        calculated_results = []
-
-        # Lakukan iterasi koin seperti yang ditunjukkan oleh log trace data Anda
-        for item in items:
-            coin_name = item.get("koin", "")
-            live_price = float(item.get("harga", 0.0))
-            entry_price = float(item.get("entry", 0.0))
-            atr = float(item.get("atr", 0.0))
-            vol_spike_ratio = float(item.get("rasio", 1.0))
-            whale_dominance = float(item.get("whale", 50.0))
-
-            # Ambil peak dari state memori ter-update
-            current_peak = 0.0
-            if device_id in state.trailing_peaks and coin_name in state.trailing_peaks[device_id]:
-                current_peak = float(state.trailing_peaks[device_id][coin_name])
-
-            # Panggil fungsi tanpa menyertakan 'is_btc_safe' (diganti dengan btc_risk_level)
-            dtp, dcl = hitung_matriks_atr_dinamis(
-                live_price=live_price,
-                entry_price=entry_price,
-                atr=atr,
-                vol_spike_ratio=vol_spike_ratio,
-                whale_dominance=whale_dominance,
-                btc_risk_level=btc_risk_level,  # <-- Menggunakan level hasil konversi diatas
-                highest_peak=current_peak
-            )
-
-            calculated_results.append({
-                "koin": coin_name,
-                "dynamic_tp": dtp,
-                "dynamic_cl": dcl
-            })
-
-        return jsonify({
-            "status": "success",
-            "btc_risk_level": btc_risk_level,
-            "results": calculated_results
-        }), 200
-
-    except Exception as e:
-        app.logger.error(f"Error executing quantitative data route: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
+    # 2. Bootstrapping Cepat jika Cache Kosong
     with state.lock:
         cache_empty = not state.market_data_cache
 
@@ -239,88 +172,110 @@ def get_data():
             except:
                 pass
 
-    with state.lock:
-        active_portfolio = dict(state.portfolio_dynamics.get(device_id, {}))
-        cache_snapshot = copy.deepcopy(state.market_data_cache)
-        btc_safe_snapshot = state.btc_status["is_safe"]
+    # 3. Pengolahan Data Pasar Terpadu & Kalkulasi Kuantitatif
+    try:
+        with state.lock:
+            active_portfolio = dict(state.portfolio_dynamics.get(device_id, {}))
+            cache_snapshot = copy.deepcopy(state.market_data_cache)
+            btc_safe_snapshot = state.btc_status["is_safe"]
+            btc_reason_snapshot = state.btc_status["reason"].upper()
+            btc_returns_snapshot = list(state.btc_returns)
 
-    user_market_data = []
+        # Hitung rata-rata return BTC dan konversi ke skala Tingkat Risiko (1-4)
+        avg_btc_return = np.mean(btc_returns_snapshot) if btc_returns_snapshot else 0.0
 
-    for original_item in cache_snapshot:
-        item = original_item  
-        coin = item["koin"]
+        if not btc_safe_snapshot and ("CRASH" in btc_reason_snapshot or "CAPITULATION" in btc_reason_snapshot or avg_btc_return < -0.04):
+            btc_risk_level = 4
+        elif not btc_safe_snapshot or "BREAKDOWN" in btc_reason_snapshot or avg_btc_return < -0.02:
+            btc_risk_level = 3
+        elif "SQUEEZE" in btc_reason_snapshot or "CONSOLIDATION" in btc_reason_snapshot or -0.01 <= avg_btc_return < 0.01:
+            btc_risk_level = 2
+        else:
+            btc_risk_level = 1
 
-        if coin in active_portfolio:
-            item["is_portfolio"] = True
-            coin_p_data = active_portfolio[coin]
-            item["amount"] = coin_p_data.get("amount", 0.0)
-            item["entry"] = coin_p_data.get("costPrice", 0.0)
+        user_market_data = []
 
-            current_peak = 0.0
-            if item["entry"] > 0 and item["amount"] > 0:
-                current_peak = state.update_trailing_peak(device_id, coin, item["entry"], item["harga"])
+        for original_item in cache_snapshot:
+            item = original_item  
+            coin = item["koin"]
 
-            if item["entry"] > 0 and item["amount"] > 0:
+            if coin in active_portfolio:
+                item["is_portfolio"] = True
+                coin_p_data = active_portfolio[coin]
+                item["amount"] = coin_p_data.get("amount", 0.0)
+                item["entry"] = coin_p_data.get("costPrice", 0.0)
+
+                current_peak = 0.0
+                if item["entry"] > 0 and item["amount"] > 0:
+                    current_peak = state.update_trailing_peak(device_id, coin, item["entry"], item["harga"])
+
+                if item["entry"] > 0 and item["amount"] > 0:
+                    dtp, dcl = hitung_matriks_atr_dinamis(
+                        live_price=item["harga"],
+                        entry_price=item["entry"],
+                        atr=item["atr"],
+                        vol_spike_ratio=item["rasio"],
+                        whale_dominance=item["whale"],
+                        btc_risk_level=btc_risk_level,
+                        highest_peak=current_peak
+                    )
+                    item["tp"] = dtp
+                    item["cl"] = dcl
+                    item["current_value"] = item["amount"] * item["harga"]
+                    initial_val = item["amount"] * item["entry"]
+                    item["pnl_val"] = item["current_value"] - initial_val
+                    item["pnl_pct"] = (item["pnl_val"] / initial_val) * 100
+
+                    if item["harga"] >= item["tp"]: 
+                        item["status_aksi"] = "TAKE PROFIT"
+                    elif item["harga"] <= item["cl"]: 
+                        item["status_aksi"] = "CUT LOSS"
+                    else: 
+                        item["status_aksi"] = "HOLDING"
+            else:
+                item["is_portfolio"] = False
+                item["amount"] = 0.0
+                item["entry"] = 0.0
+
                 dtp, dcl = hitung_matriks_atr_dinamis(
                     live_price=item["harga"],
-                    entry_price=item["entry"],
+                    entry_price=0.0,
                     atr=item["atr"],
                     vol_spike_ratio=item["rasio"],
                     whale_dominance=item["whale"],
-                    is_btc_safe=btc_safe_snapshot,
-                    highest_peak=current_peak
+                    btc_risk_level=btc_risk_level,
+                    highest_peak=0.0
                 )
                 item["tp"] = dtp
                 item["cl"] = dcl
-                item["current_value"] = item["amount"] * item["harga"]
-                initial_val = item["amount"] * item["entry"]
-                item["pnl_val"] = item["current_value"] - initial_val
-                item["pnl_pct"] = (item["pnl_val"] / initial_val) * 100
+                item["pnl_val"] = 0.0
+                item["pnl_pct"] = 0.0
+                item["current_value"] = 0.0
 
-                if item["harga"] >= item["tp"]: 
-                    item["status_aksi"] = "TAKE PROFIT"
-                elif item["harga"] <= item["cl"]: 
-                    item["status_aksi"] = "CUT LOSS"
-                else: 
-                    item["status_aksi"] = "HOLDING"
-        else:
-            item["is_portfolio"] = False
-            item["amount"] = 0.0
-            item["entry"] = 0.0
+                if "ENGINE LOCKED" not in item["fase"]:
+                    if item["fase"] in ["INSTITUTIONAL BUY", "VALID BREAKOUT", "EARLY RALLY", "⚡ SQUEEZE BREAKOUT (EARLY TREND)", "🐳 WHALE ACCUMULATION (SILENT)", "🔄 MOMENTUM REVERSAL (BOTTOMING)"]:
+                        item["status_aksi"] = "BUY STAGE"
+                    elif item["fase"] == "OVERBOUGHT PEAK":
+                        item["status_aksi"] = "TAKE PROFIT"
+                    else:
+                        item["status_aksi"] = "WAIT & SEE"
 
-            dtp, dcl = hitung_matriks_atr_dinamis(
-                live_price=item["harga"],
-                entry_price=0.0,
-                atr=item["atr"],
-                vol_spike_ratio=item["rasio"],
-                whale_dominance=item["whale"],
-                is_btc_safe=btc_safe_snapshot
-            )
-            item["tp"] = dtp
-            item["cl"] = dcl
-            item["pnl_val"] = 0.0
-            item["pnl_pct"] = 0.0
-            item["current_value"] = 0.0
-            
-            if "ENGINE LOCKED" not in item["fase"]:
-                if item["fase"] in ["INSTITUTIONAL BUY", "VALID BREAKOUT", "EARLY RALLY", "⚡ SQUEEZE BREAKOUT (EARLY TREND)", "🐳 WHALE ACCUMULATION (SILENT)", "🔄 MOMENTUM REVERSAL (BOTTOMING)"]:
-                    item["status_aksi"] = "BUY STAGE"
-                elif item["fase"] == "OVERBOUGHT PEAK":
-                    item["status_aksi"] = "TAKE PROFIT"
-                else:
-                    item["status_aksi"] = "WAIT & SEE"
+            user_market_data.append(item)
 
-        user_market_data.append(item)
+        user_market_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
 
-    user_market_data.sort(key=lambda x: (x['is_portfolio'], x['skor']), reverse=True)
+        with state.lock:
+            btc_status_response = dict(state.btc_status)
+            btc_status_response["risk_level"] = btc_risk_level
 
-    with state.lock:
-        btc_status_response = dict(state.btc_status)
+        return jsonify({
+            "btc_status": btc_status_response,
+            "market": user_market_data
+        }), 200
 
-    return jsonify({
-        "btc_status": btc_status_response,
-        "market": user_market_data
-    })
+    except Exception as e:
+        app.logger.error(f"Error executing quantitative data route: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/api/telegram/send_manual', methods=['POST'])
 def send_manual_alert():
