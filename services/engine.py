@@ -236,39 +236,65 @@ def calculate_confidence_score(market_struct, breakout_status, z_score, percenti
     return score, action
 
 def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, whale_dominance, btc_risk_level, highest_peak=0.0):
-    base_tp_multiplier = 2.0
-    base_cl_multiplier = 1.5
+    try:
+        # 1. Konversi paksa tipe data input ke Float untuk keamanan kalkulasi
+        live_price = float(live_price or 0.0)
+        entry_price = float(entry_price or 0.0)
+        atr = float(atr or 0.0)
+        vol_spike_ratio = float(vol_spike_ratio or 1.0)
+        whale_dominance = float(whale_dominance or 50.0)
+        btc_risk_level = int(btc_risk_level or 1)
+        highest_peak = float(highest_peak or 0.0)
 
-    if vol_spike_ratio > 3.0:
-        base_tp_multiplier += 0.6  
-    elif vol_spike_ratio > 1.8:
-        base_tp_multiplier += 0.3
+        # 2. Tentukan Base Multiplier berdasarkan tingkat risiko BTC (Aman dari NoneType)
+        if btc_risk_level == 4:
+            base_multiplier = 1.2
+        elif btc_risk_level == 3:
+            base_multiplier = 1.5
+        elif btc_risk_level == 2:
+            base_multiplier = 2.0
+        else:
+            base_multiplier = 2.5 # Default fallback untuk Level 1 atau lainnya
 
-    if whale_dominance > 75.0:
-        base_cl_multiplier -= 0.3  
-    elif whale_dominance > 55.0:
-        base_cl_multiplier -= 0.1
+        # 3. Penyesuaian Volatilitas (Volatility Adjustment)
+        # Jika volume melonjak tajam, lebarkan jarak agar tidak terkena sumbu palsu
+        if vol_spike_ratio > 2.0:
+            vol_modifier = 1.3
+        elif vol_spike_ratio > 1.5:
+            vol_modifier = 1.15
+        else:
+            vol_modifier = 1.0
 
-    if btc_risk_level >= 3:
-        base_tp_multiplier -= 0.6  
-        base_cl_multiplier += 0.3  
+        # 4. Penyesuaian Dominasi Whale (Whale Adjustment)
+        whale_modifier = 0.9 if whale_dominance > 65.0 else 1.0
 
-    base_tp_multiplier = max(1.2, base_tp_multiplier)
-    base_cl_multiplier = max(0.8, base_cl_multiplier)
+        # 5. Rumus Final Pengali Matriks ATR (Aman, dipastikan menghasilkan Float)
+        final_multiplier = base_multiplier * vol_modifier * whale_modifier
 
-    if entry_price > 0:
-        tp_level = entry_price + (base_tp_multiplier * atr)
-        cl_level = entry_price - (base_cl_multiplier * atr)
+        # 6. Kalkulasi Target Harga Keluar (Take Profit & Cut Loss)
+        # Menghitung jarak stop berbasis nilai ATR aktual koin
+        atr_distance = atr * final_multiplier
 
-        if highest_peak > entry_price:
-            chandelier_exit_floor = highest_peak - (1.3 * atr)
-            if chandelier_exit_floor > cl_level:
-                cl_level = chandelier_exit_floor
-    else:
-        tp_level = live_price + (base_tp_multiplier * atr)
-        cl_level = live_price - (base_cl_multiplier * atr)
+        # Logika Trailing jika harga sudah bergerak naik melewati harga masuk
+        reference_price = max(entry_price, highest_peak) if highest_peak > 0.0 else entry_price
 
-    return tp_level, cl_level
+        # Nilai Target Output
+        dynamic_tp = reference_price + (atr_distance * 1.5)
+        dynamic_cl = reference_price - atr_distance
+
+        # Antisipasi proteksi agar batas harga tidak bernilai negatif
+        if dynamic_cl < 0:
+            dynamic_cl = entry_price * 0.95 
+
+        return round(dynamic_tp, 6), round(dynamic_cl, 6)
+
+    except Exception as e:
+        # Jika terjadi error tidak terduga, kembalikan persentase manual (5% TP, 3% CL) dari entry
+        print(f"[ENGINE RECOVERY CRITICAL] Fallback ATR terpicu akibat: {e}")
+        fallback_tp = entry_price * 1.05
+        fallback_cl = entry_price * 0.97
+        return round(fallback_tp, 6), round(fallback_cl, 6)
+
 
 
 # ==============================================================================
