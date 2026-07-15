@@ -142,7 +142,7 @@ def get_data():
     req = request.json or {}
     device_id = req.get("device_id", "default_guest_device")
 
-    # 1. Sinkronisasi Dynamic Cache Portfolio (Kode Asli Kamu)
+    # 1. Sinkronisasi Portofolio Cache (Logika Asli Anda)
     try:
         with state.lock:
             state.portfolio_dynamics[device_id] = req.get("portfolio", {})
@@ -154,30 +154,17 @@ def get_data():
     except Exception as e:
         print(f"Failed to synchronize device dynamic cache: {e}")
 
-    # 2. Blok Ekstraksi Parameter & Kalkulasi ATR Dinamis (Pemicu Error Sebelumnya)
+    # 2. Kalkulasi ATR Dinamis Berdasarkan Tingkat Risiko BTC Baru
     try:
-        live_price = float(req.get("live_price", 0.0))
-        entry_price = float(req.get("entry_price", 0.0))
-        atr = float(req.get("atr", 0.0))
-        vol_spike_ratio = float(req.get("vol_spike_ratio", 1.0))
-        whale_dominance = float(req.get("whale_dominance", 50.0))
-        
-        # Ambil peak dari state global yang baru saja disinkronkan di atas
-        coin_name = req.get("coin_name", "")
-        current_peak = 0.0
-        if device_id in state.trailing_peaks and coin_name in state.trailing_peaks[device_id]:
-            current_peak = float(state.trailing_peaks[device_id][coin_name])
-
-        # Ekstrak status BTC untuk menentukan level risiko integer (1 - 4)
+        # Ekstrak status BTC global dari state aplikasi
         btc_status = state.btc_status if hasattr(state, 'btc_status') else {}
         is_btc_safe = btc_status.get("is_safe", True)
         btc_reason = str(btc_status.get("reason", "")).upper()
         
-        # Menghitung btc_returns secara aman untuk penentuan risiko
         btc_returns_snapshot = state.get_btc_returns() if hasattr(state, 'get_btc_returns') else []
         avg_btc_return = np.mean(btc_returns_snapshot) if btc_returns_snapshot else 0.0
 
-        # Peta konversi ke Integer Risiko sesuai standar engine.py baru
+        # Konversi status ke Integer Level Risiko (1-4) sesuai arsitektur engine.py baru
         if not is_btc_safe and ("CRASH" in btc_reason or "CAPITULATION" in btc_reason or avg_btc_return < -0.04):
             btc_risk_level = 4
         elif not is_btc_safe or "BREAKDOWN" in btc_reason or avg_btc_return < -0.02:
@@ -187,29 +174,51 @@ def get_data():
         else:
             btc_risk_level = 1
 
-        # 3. Eksekusi Fungsi Kuantitatif dengan Parameter Baru (Aman dari Tipe Data Crash)
-        dtp, dcl = hitung_matriks_atr_dinamis(
-            live_price=live_price,
-            entry_price=entry_price,
-            atr=atr,
-            vol_spike_ratio=vol_spike_ratio,
-            whale_dominance=whale_dominance,
-            btc_risk_level=btc_risk_level,  # <-- SEKARANG MENERIMA INTEGER 1-4
-            highest_peak=current_peak
-        )
+        # Ambil payload item data koin dari request klien
+        # Sesuaikan dengan format data yang dikirim oleh client frontend Anda
+        items = req.get("items", [])
+        calculated_results = []
+
+        # Lakukan iterasi koin seperti yang ditunjukkan oleh log trace data Anda
+        for item in items:
+            coin_name = item.get("koin", "")
+            live_price = float(item.get("harga", 0.0))
+            entry_price = float(item.get("entry", 0.0))
+            atr = float(item.get("atr", 0.0))
+            vol_spike_ratio = float(item.get("rasio", 1.0))
+            whale_dominance = float(item.get("whale", 50.0))
+
+            # Ambil peak dari state memori ter-update
+            current_peak = 0.0
+            if device_id in state.trailing_peaks and coin_name in state.trailing_peaks[device_id]:
+                current_peak = float(state.trailing_peaks[device_id][coin_name])
+
+            # Panggil fungsi tanpa menyertakan 'is_btc_safe' (diganti dengan btc_risk_level)
+            dtp, dcl = hitung_matriks_atr_dinamis(
+                live_price=live_price,
+                entry_price=entry_price,
+                atr=atr,
+                vol_spike_ratio=vol_spike_ratio,
+                whale_dominance=whale_dominance,
+                btc_risk_level=btc_risk_level,  # <-- Menggunakan level hasil konversi diatas
+                highest_peak=current_peak
+            )
+
+            calculated_results.append({
+                "koin": coin_name,
+                "dynamic_tp": dtp,
+                "dynamic_cl": dcl
+            })
 
         return jsonify({
             "status": "success",
-            "dynamic_tp": dtp,
-            "dynamic_cl": dcl
+            "btc_risk_level": btc_risk_level,
+            "results": calculated_results
         }), 200
 
     except Exception as e:
-        # Menangkap kegagalan agar tidak merusak siklus WSGI Gunicorn (Mengembalikan status 500 terstruktur)
-        return jsonify({
-            "status": "error",
-            "message": f"Kalkulasi gagal akibat: {str(e)}"
-        }), 500
+        app.logger.error(f"Error executing quantitative data route: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
     with state.lock:
