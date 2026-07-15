@@ -4,13 +4,13 @@ from threading import Thread, Lock
 from flask import Flask, render_template, jsonify, request
 import httpx
 import asyncio
-import numpy as np
-
+import numpy as np  # <-- Memperbaiki NameError 'np'
 
 from config import CACHE_TTL_SECONDS
 from services.binance_service import (
     check_bitcoin_circuit_breaker, get_combined_tickers_data_async
 )
+# Tetap gunakan ini karena file Anda ada di dalam folder services/
 from services.engine import process_single_coin_pipeline, hitung_matriks_atr_dinamis
 from services.telegram_service import send_telegram_in_worker_thread
 
