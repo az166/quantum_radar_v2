@@ -4,6 +4,8 @@ from threading import Thread, Lock
 from flask import Flask, render_template, jsonify, request
 import httpx
 import asyncio
+import numpy as np
+
 
 from config import CACHE_TTL_SECONDS
 from services.binance_service import (
