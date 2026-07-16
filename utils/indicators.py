@@ -1,4 +1,5 @@
 import math
+import numpy as np
 
 def calculate_ma(prices, period):
     if len(prices) < period: 
@@ -12,6 +13,49 @@ def calculate_std_dev(prices, period):
     variance = sum((x - ma) ** 2 for x in prices[-period:]) / period
     return math.sqrt(variance) if variance > 0 else 0.00001
 
+# ==============================================================================
+# OPTIMASI SINGLE-PASS (MA, BOLLINGER BANDS, KELTNER CHANNELS & SQUEEZE)
+# ==============================================================================
+def calculate_technical_envelope_single_pass(prices, atr, period=20, num_std_dev=2.0, num_atr_mult=1.5):
+    """
+    Menghitung MA, Bollinger Bands, dan Keltner Channels dalam satu langkah (Single-Pass).
+    Mengurangi konversi tipe data (casting) array berulang untuk performa CPU maksimal.
+    """
+    prices_arr = np.array(prices, dtype=float)
+    n = len(prices_arr)
+    
+    # Validasi data minimal
+    if n < period:
+        fallback_ma = float(np.mean(prices_arr)) if n > 0 else 0.0
+        return fallback_ma, fallback_ma, fallback_ma, fallback_ma, fallback_ma, False
+
+    # 1. Hitung SMA menggunakan trik kumulatif (cumsum) untuk kecepatan O(N)
+    cumsum = np.cumsum(np.insert(prices_arr, 0, 0))
+    ma_rolling = (cumsum[period:] - cumsum[:-period]) / period
+    current_ma = float(ma_rolling[-1])
+
+    # 2. Ambil sub-array jendela terakhir untuk menghitung Standar Deviasi secara instan
+    last_window = prices_arr[-period:]
+    std_dev = float(np.std(last_window))
+    if std_dev <= 0:
+        std_dev = 0.00001  # Pengaman pembagian nol
+
+    # 3. Kalkulasi batas Bollinger Bands
+    bb_upper = current_ma + (num_std_dev * std_dev)
+    bb_lower = current_ma - (num_std_dev * std_dev)
+
+    # 4. Kalkulasi batas Keltner Channels (menggunakan nilai ATR yang dilewatkan)
+    kc_upper = current_ma + (num_atr_mult * atr)
+    kc_lower = current_ma - (num_atr_mult * atr)
+
+    # 5. Deteksi Squeeze (Kondisi Bollinger Bands berada di dalam Keltner Channels)
+    is_squeeze = (bb_upper < kc_upper) and (bb_lower > kc_lower)
+
+    return current_ma, bb_upper, bb_lower, kc_upper, kc_lower, is_squeeze
+
+# ==============================================================================
+# INDIKATOR TEKNIKAL LAINNYA
+# ==============================================================================
 def calculate_obv_trend(klines_1h):
     if len(klines_1h) < 10: 
         return True
