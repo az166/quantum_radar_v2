@@ -92,13 +92,13 @@ def calculate_volume_metrics(klines_1h, window=20):
         return 0.0, 50.0
     historical_volumes = [float(k[7]) for k in klines_1h[-(window+1):-1]]
     current_volume = float(klines_1h[-1][7])
-    
+
     mean_vol = np.mean(historical_volumes)
     std_vol = np.std(historical_volumes)
-    
+
     z_score = (current_volume - mean_vol) / std_vol if std_vol > 0.00001 else 0.0
     z_score = max(-3.0, min(6.0, z_score))
-    
+
     all_vols = historical_volumes + [current_volume]
     percentile = (np.sum(np.array(all_vols) <= current_volume) / len(all_vols)) * 100
     return round(z_score, 2), round(percentile, 1)
@@ -110,7 +110,7 @@ def analyze_market_structure(klines_1h, window=5):
     highs = [float(k[2]) for k in klines_1h]
     lows = [float(k[3]) for k in klines_1h]
     closes = [float(k[4]) for k in klines_1h]
-    
+
     swing_highs = []
     swing_lows = []
 
@@ -138,7 +138,7 @@ def analyze_market_structure(klines_1h, window=5):
     current_close = closes[-1]
     if structure == "BEARISH_STRUCTURE" and current_close > last_sh:
         structure = "MSS_BULLISH_BREAKOUT"
-    
+
     return structure, last_sh, last_sl
 
 def verify_breakout_status(live_price, last_close, open_price, high_price, low_price, local_swing_high, z_score):
@@ -157,7 +157,7 @@ def verify_breakout_status(live_price, last_close, open_price, high_price, low_p
             return "PENDING_BREAKOUT"
         if is_closed_above and body_to_range_ratio >= 0.45 and z_score >= 1.5:
             return "CONFIRMED_BREAKOUT"
-            
+
     return "NO_BREAKOUT"
 
 def calculate_atr_and_spread(klines_1d, klines_1h):
@@ -246,7 +246,7 @@ def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, wh
         btc_risk_level = int(btc_risk_level or 1)
         highest_peak = float(highest_peak or 0.0)
 
-        # 2. Tentukan Base Multiplier berdasarkan tingkat risiko BTC (Aman dari NoneType)
+        # 2. Tentukan Base Multiplier berdasarkan tingkat risiko BTC
         if btc_risk_level == 4:
             base_multiplier = 1.2
         elif btc_risk_level == 3:
@@ -254,10 +254,9 @@ def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, wh
         elif btc_risk_level == 2:
             base_multiplier = 2.0
         else:
-            base_multiplier = 2.5 # Default fallback untuk Level 1 atau lainnya
+            base_multiplier = 2.5
 
         # 3. Penyesuaian Volatilitas (Volatility Adjustment)
-        # Jika volume melonjak tajam, lebarkan jarak agar tidak terkena sumbu palsu
         if vol_spike_ratio > 2.0:
             vol_modifier = 1.3
         elif vol_spike_ratio > 1.5:
@@ -268,11 +267,10 @@ def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, wh
         # 4. Penyesuaian Dominasi Whale (Whale Adjustment)
         whale_modifier = 0.9 if whale_dominance > 65.0 else 1.0
 
-        # 5. Rumus Final Pengali Matriks ATR (Aman, dipastikan menghasilkan Float)
+        # 5. Rumus Final Pengali Matriks ATR
         final_multiplier = base_multiplier * vol_modifier * whale_modifier
 
         # 6. Kalkulasi Target Harga Keluar (Take Profit & Cut Loss)
-        # Menghitung jarak stop berbasis nilai ATR aktual koin
         atr_distance = atr * final_multiplier
 
         # Logika Trailing jika harga sudah bergerak naik melewati harga masuk
@@ -289,12 +287,10 @@ def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, wh
         return round(dynamic_tp, 6), round(dynamic_cl, 6)
 
     except Exception as e:
-        # Jika terjadi error tidak terduga, kembalikan persentase manual (5% TP, 3% CL) dari entry
         print(f"[ENGINE RECOVERY CRITICAL] Fallback ATR terpicu akibat: {e}")
         fallback_tp = entry_price * 1.05
         fallback_cl = entry_price * 0.97
         return round(fallback_tp, 6), round(fallback_cl, 6)
-
 
 
 # ==============================================================================
@@ -321,7 +317,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 
             live_price = state_manager.get_live_price(symbol, float(klines_1h[-1][4]))
             btc_returns_snapshot = state_manager.get_btc_returns()
-            
+
             open_price = float(klines_1h[-1][1])
             price_pct_1h = (((live_price - open_price) / open_price) * 100) if open_price > 0 else 0.0
             atr, spread_ratio = calculate_atr_and_spread(klines_1d, klines_1h)
@@ -337,7 +333,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 
             # 1. Perhitungan Kuantitatif Volume Z-Score & Percentile
             vol_z_score, vol_percentile = calculate_volume_metrics(klines_1h, window=20)
-            
+
             # Mengamankan kompatibilitas kalkulator lama
             volumes = [float(k[7]) for k in klines_1h]
             vol_ma20 = sum(volumes[:-1][-20:]) / min(len(volumes[:-1]), 20) if len(volumes) > 1 else 1.0
@@ -418,7 +414,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 btc_risk=btc_risk
             )
 
-            # Penentuan label Fase Pasar Klasik (Untuk kebutuhan display/alert telegram)
+            # Penentuan label Fase Pasar Klasik
             fase = "CONSOLIDATION"
             if btc_risk["level"] == 4 and coin_name not in user_portfolio:
                 fase = f"ENGINE LOCKED ({state_manager.btc_status.get('reason','CRASH')})"
@@ -431,7 +427,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                     fase = "🐳 WHALE ACCUMULATION (SILENT)"
                 elif is_bullish_div and price_pct_1h > volatility_based_threshold:
                     fase = "🔄 MOMENTUM REVERSAL (BOTTOMING)"
-                    
+
             # 5. Alert Trigger & Mekanisme Pengiriman Telegram Sinyal
             if state_manager.is_alert_state_differs(coin_name, fase):
                 if status_rencana_otomatis in ["STRONG_BUY", "STRONG BUY"] or fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY", "⚡ SQUEEZE BREAKOUT (EARLY TREND)"]:
@@ -439,7 +435,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                         emoji = "👑 BRAND NEW MSS BREAKOUT!" if fase == "INSTITUTIONAL BUY" else "🔥 BREAKOUT SPIKE"
                         fvg_info = f"\n⚠️ Fair Value Gap Spotted: Yes (Retest Area: ${fvg_target_price:.4f})" if has_fvg else ""
                         decouple_info = f"\n🔄 BTC Correlation: {btc_correlation:.2f} (Decoupled)" if is_uncorrelated_or_decoupled else f"\n🔄 BTC Correlation: {btc_correlation:.2f}"
-                        
+
                         harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
                         send_telegram_in_worker_thread(
                             f"{emoji}\n\nCoin: *{coin_name}*\nConfidence Score: `{momentum_score}/100` (`{status_rencana_otomatis}`)\n"
@@ -468,16 +464,17 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 highest_peak=current_peak
             )
 
-            # 6. Registrasi Sinyal Rencana ke Performance Logger saat Aksi Valid terdeteksi
+            # PERBAIKAN BUG 1: Menggunakan nama simbol Binance lengkap (misal: BTCUSDT) agar konsisten dengan payload Binance API
             if status_rencana_otomatis == "STRONG BUY" and entry_price == 0:
                 perf_logger.log_entry_signal(
-                    symbol=coin_name, entry_price=live_price, score=momentum_score, 
+                    symbol=symbol, entry_price=live_price, score=momentum_score, 
                     action=status_rencana_otomatis, z_score=vol_z_score, 
                     btc_risk_status=btc_risk["status"], tp_level=dynamic_tp, cl_level=dynamic_cl
                 )
 
+            # PERBAIKAN BUG 2: Penentuan batas pengaman ATR agar aman terhadap pecahan desimal yang kecil (koin bernilai murah)
             max_allowed_atr = live_price * 0.15
-            smoothed_atr = min(atr, max_allowed_atr) if atr > 0 else (live_price * 0.02)
+            smoothed_atr = max(0.000001, min(atr, max_allowed_atr) if atr > 0 else (live_price * 0.02))
 
             if status_rencana_otomatis == "STRONG BUY" and has_fvg:
                 saran_entry = fvg_target_price
