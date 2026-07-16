@@ -2,6 +2,7 @@ import asyncio
 import numpy as np
 import os
 import json
+import time
 from datetime import datetime
 from utils.indicators import (
     calculate_ma, calculate_std_dev, calculate_obv_trend,
@@ -11,7 +12,32 @@ from services.binance_service import fetch_klines_safely_async, fetch_order_book
 from services.telegram_service import send_telegram_in_worker_thread
 
 # ==============================================================================
-# 1. PERFORMANCE LOGGER & BACKTESTING ENGINE (TEROPTIMALISASI ASYNC)
+# DATA CACHE STORE (MULTI-TIER CACHING)
+# ==============================================================================
+# Menyimpan data kline di RAM untuk menghindari pembatasan laju panggilan (rate limit) Binance
+_kline_cache = {}
+
+async def fetch_klines_cached(client, symbol, interval, limit, ttl_seconds):
+    """
+    Mengambil data kline dengan sistem penyimpanan sementara (cache).
+    Mencegah panggilan API berulang untuk data historis yang jarang berubah.
+    """
+    key = f"{symbol}_{interval}_{limit}"
+    now = time.time()
+    
+    if key in _kline_cache:
+        cached_data, expire_time = _kline_cache[key]
+        if now < expire_time:
+            return cached_data
+            
+    data = await fetch_klines_safely_async(client, symbol, interval, limit)
+    if data:
+        _kline_cache[key] = (data, now + ttl_seconds)
+    return data
+
+
+# ==============================================================================
+# 1. PERFORMANCE LOGGER & BACKTESTING ENGINE
 # ==============================================================================
 class TradingPerformanceLogger:
     def __init__(self, log_filepath="logs/signal_performance.json"):
@@ -32,7 +58,6 @@ class TradingPerformanceLogger:
         except Exception as e:
             print(f"Error logging entry signal: {e}")
 
-    # Perbaikan 1: Konversi ke non-blocking I/O menggunakan Thread Pool
     async def log_entry_signal_async(self, symbol, entry_price, score, action, z_score, btc_risk_status, tp_level, cl_level):
         log_entry = {
             "signal_id": f"{symbol}_{int(datetime.now().timestamp())}",
@@ -59,7 +84,6 @@ class TradingPerformanceLogger:
                 data = json.load(f)
                 updated = False
                 for entry in data:
-                    # Perbaikan 3: Mencocokkan posisi aktif (OPEN) berdasarkan simbol koin
                     if entry["symbol"] == symbol and entry["status"] == "OPEN":
                         entry["status"] = "CLOSED"
                         entry["exit_price"] = exit_price
@@ -75,7 +99,6 @@ class TradingPerformanceLogger:
         except Exception as e:
             print(f"Error closing logged signal for {symbol}: {e}")
 
-    # Perbaikan 1 & 3: Penutupan posisi asinkron berbasis simbol koin
     async def close_logged_signal_async(self, symbol, exit_price, current_time=None):
         exit_time = current_time if current_time else datetime.now().isoformat()
         await asyncio.to_thread(self._write_close_to_file, symbol, exit_price, exit_time)
@@ -85,7 +108,7 @@ perf_logger = TradingPerformanceLogger()
 
 
 # ==============================================================================
-# 2. QUANTITATIVE HELPER FUNCTIONS
+# 2. QUANTITATIVE HELPER FUNCTIONS (VEKTORISASI NUMPY & OPTIMASI)
 # ==============================================================================
 def detect_fair_value_gap(klines_1h):
     if len(klines_1h) < 3:
@@ -97,7 +120,6 @@ def detect_fair_value_gap(klines_1h):
         return True, fvg_midpoint
     return False, 0.0
 
-# Perbaikan 5: Menghilangkan redundansi kalkulasi volume
 def calculate_volume_metrics(klines_1h, window=20):
     if len(klines_1h) < window + 1:
         return 0.0, 50.0, 1.0
@@ -113,35 +135,48 @@ def calculate_volume_metrics(klines_1h, window=20):
     all_vols = historical_volumes + [current_volume]
     percentile = (np.sum(np.array(all_vols) <= current_volume) / len(all_vols)) * 100
     
-    # Rasio lonjakan volume dihitung langsung di sini untuk efisiensi CPU
     vol_spike_ratio = current_volume / mean_vol if mean_vol > 0 else 1.0
     
     return round(z_score, 2), round(percentile, 1), round(vol_spike_ratio, 2)
 
 def analyze_market_structure(klines_1h, window=5):
-    if len(klines_1h) < 30:
+    """
+    Menganalisis struktur pasar menggunakan vektorisasi NumPy.
+    Mengeliminasi perulangan lambat Python untuk deteksi swing high dan swing low.
+    """
+    n = len(klines_1h)
+    if n < 30:
         return "CONSOLIDATION", 0.0, 0.0
 
-    highs = [float(k[2]) for k in klines_1h]
-    lows = [float(k[3]) for k in klines_1h]
-    closes = [float(k[4]) for k in klines_1h]
+    highs = np.array([float(k[2]) for k in klines_1h])
+    lows = np.array([float(k[3]) for k in klines_1h])
+    closes = np.array([float(k[4]) for k in klines_1h])
 
-    swing_highs = []
-    swing_lows = []
+    # Deteksi puncak (Swing High) dan lembah (Swing Low) secara simultan menggunakan pergeseran array
+    is_swing_high = np.ones(n, dtype=bool)
+    is_swing_low = np.ones(n, dtype=bool)
 
-    for i in range(window, len(klines_1h) - window - 1):
-        if highs[i] == max(highs[i-window:i+window+1]):
-            swing_highs.append((i, highs[i]))
-        if lows[i] == min(lows[i-window:i+window+1]):
-            swing_lows.append((i, lows[i]))
+    for offset in range(-window, window + 1):
+        if offset == 0:
+            continue
+        shifted_high = np.roll(highs, -offset)
+        shifted_low = np.roll(lows, -offset)
+        is_swing_high &= (highs >= shifted_high)
+        is_swing_low &= (lows <= shifted_low)
 
-    if len(swing_highs) < 2 or len(swing_lows) < 2:
-        return "CONSOLIDATION", max(highs[-10:]), min(lows[-10:])
+    # Singkirkan elemen ujung yang terkena efek perputaran indeks dari np.roll
+    valid_range = (np.arange(n) >= window) & (np.arange(n) < n - window)
+    swing_high_indices = np.where(is_swing_high & valid_range)[0]
+    swing_low_indices = np.where(is_swing_low & valid_range)[0]
 
-    last_sh = swing_highs[-1][1]
-    prev_sh = swing_highs[-2][1]
-    last_sl = swing_lows[-1][1]
-    prev_sl = swing_lows[-2][1]
+    if len(swing_high_indices) < 2 or len(swing_low_indices) < 2:
+        return "CONSOLIDATION", float(np.max(highs[-10:])), float(np.min(lows[-10:]))
+
+    # Ambil nilai puncak dan lembah terakhir serta sebelumnya
+    last_sh = float(highs[swing_high_indices[-1]])
+    prev_sh = float(highs[swing_high_indices[-2]])
+    last_sl = float(lows[swing_low_indices[-1]])
+    prev_sl = float(lows[swing_low_indices[-2]])
 
     if last_sh > prev_sh and last_sl > prev_sl:
         structure = "BULLISH_STRUCTURE"
@@ -156,14 +191,11 @@ def analyze_market_structure(klines_1h, window=5):
 
     return structure, last_sh, last_sl
 
-# Perbaikan 4: Penggunaan batas pengaman desimal dinamis (Dynamic Decimal Guard)
 def verify_breakout_status(live_price, last_close, open_price, high_price, low_price, local_swing_high, z_score):
     if local_swing_high == 0:
         return "NO_BREAKOUT"
 
     candle_body = abs(live_price - open_price)
-    
-    # Batas pengaman dinamis menggunakan 0.01% dari harga live saat ini
     min_range_guard = live_price * 0.0001 if live_price > 0 else 0.00000001
     candle_range = max(min_range_guard, high_price - low_price)
     body_to_range_ratio = candle_body / candle_range
@@ -305,11 +337,12 @@ def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, wh
 # ==============================================================================
 async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, semaphore, state_manager, device_id="default_guest_device"):
     async with semaphore:
-        task_1w = fetch_klines_safely_async(client, symbol, '1w', 4)   
-        task_1d = fetch_klines_safely_async(client, symbol, '1d', 105)  
-        task_1h = fetch_klines_safely_async(client, symbol, '1h', 60)  
-        task_15m = fetch_klines_safely_async(client, symbol, '15m', 10)
-        task_depth = fetch_order_book_imbalance(client, symbol)
+        # Pipa Pengambilan Data Multi-Tier Caching (Sangat Menghemat I/O Jaringan)
+        task_1w = fetch_klines_cached(client, symbol, '1w', 4, ttl_seconds=7200)    # Simpan 2 Jam
+        task_1d = fetch_klines_cached(client, symbol, '1d', 105, ttl_seconds=3600)  # Simpan 1 Jam
+        task_1h = fetch_klines_cached(client, symbol, '1h', 60, ttl_seconds=300)    # Simpan 5 Menit
+        task_15m = fetch_klines_cached(client, symbol, '15m', 10, ttl_seconds=60)   # Simpan 1 Menit
+        task_depth = fetch_order_book_imbalance(client, symbol)                     # Real-time (Tanpa Cache)
 
         klines_1w, klines_1d, klines_1h, klines_15m, order_book_ratio = await asyncio.gather(
             task_1w, task_1d, task_1h, task_15m, task_depth
@@ -338,7 +371,6 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             is_ma_trend_bullish = live_price > ma25_daily and live_price > ma99_daily
             is_macd_momentum_bullish = macd_hist > 0
 
-            # Perbaikan 5: Output vol_spike_ratio langsung didapatkan tanpa hitung ulang manual
             vol_z_score, vol_percentile, vol_spike_ratio = calculate_volume_metrics(klines_1h, window=20)
 
             volatility_based_threshold = max(0.2, min(1.5, (atr / live_price) * 100 * 0.15)) if live_price > 0 else 0.4
@@ -378,12 +410,11 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             if len(hourly_closes) >= 10 and max(hourly_closes[-10:]) != min(hourly_closes[-10:]):
                 is_bullish_div = detect_bullish_divergence(hourly_closes, hist_list, period=10)
 
-            # Perbaikan 2: Memindahkan fungsi CPU-bound analyze_market_structure ke Thread terpisah
+            # Perbaikan Struktur Pasar dengan Vektorisasi NumPy (Sangat Cepat di Level C)
             market_struct, last_sh, last_sl = await asyncio.to_thread(
                 analyze_market_structure, klines_1h, 5
             )
-            
-            # Perbaikan 4: Penggunaan verifikasi breakout dengan dynamic guard desimal
+
             breakout_status = verify_breakout_status(
                 live_price=live_price,
                 last_close=float(klines_1h[-1][4]),
@@ -430,7 +461,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 elif is_bullish_div and price_pct_1h > volatility_based_threshold:
                     fase = "🔄 MOMENTUM REVERSAL (BOTTOMING)"
 
-            # Pengiriman telegram
+            # Pengiriman Telegram
             if state_manager.is_alert_state_differs(coin_name, fase):
                 if status_rencana_otomatis in ["STRONG_BUY", "STRONG BUY"] or fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY", "⚡ SQUEEZE BREAKOUT (EARLY TREND)"]:
                     if btc_risk["allowed_trade"] or is_uncorrelated_or_decoupled:
@@ -466,7 +497,6 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 highest_peak=current_peak
             )
 
-            # Perbaikan 1: Panggilan fungsi entri signal asinkron
             if status_rencana_otomatis == "STRONG BUY" and entry_price == 0:
                 await perf_logger.log_entry_signal_async(
                     symbol=symbol, entry_price=live_price, score=momentum_score, 
@@ -484,7 +514,6 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             else:
                 saran_entry = live_price - (0.5 * smoothed_atr)
 
-            # Perbaikan 3: Integrasi penutupan sinyal ketika posisi menyentuh Take Profit / Cut Loss
             if entry_price > 0:
                 if live_price >= dynamic_tp: 
                     status_rencana_otomatis = "TAKE PROFIT"
