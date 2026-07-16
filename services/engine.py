@@ -6,7 +6,8 @@ import time
 from datetime import datetime
 from utils.indicators import (
     calculate_ma, calculate_std_dev, calculate_obv_trend,
-    detect_bullish_divergence, calculate_macd_efficient, calculate_pearson_correlation
+    detect_bullish_divergence, calculate_macd_efficient, calculate_pearson_correlation,
+    calculate_technical_envelope_single_pass  # Memanggil fungsi optimasi Single-Pass
 )
 from services.binance_service import fetch_klines_safely_async, fetch_order_book_imbalance
 from services.telegram_service import send_telegram_in_worker_thread
@@ -24,12 +25,12 @@ async def fetch_klines_cached(client, symbol, interval, limit, ttl_seconds):
     """
     key = f"{symbol}_{interval}_{limit}"
     now = time.time()
-    
+
     if key in _kline_cache:
         cached_data, expire_time = _kline_cache[key]
         if now < expire_time:
             return cached_data
-            
+
     data = await fetch_klines_safely_async(client, symbol, interval, limit)
     if data:
         _kline_cache[key] = (data, now + ttl_seconds)
@@ -134,9 +135,9 @@ def calculate_volume_metrics(klines_1h, window=20):
 
     all_vols = historical_volumes + [current_volume]
     percentile = (np.sum(np.array(all_vols) <= current_volume) / len(all_vols)) * 100
-    
+
     vol_spike_ratio = current_volume / mean_vol if mean_vol > 0 else 1.0
-    
+
     return round(z_score, 2), round(percentile, 1), round(vol_spike_ratio, 2)
 
 def analyze_market_structure(klines_1h, window=5):
@@ -399,12 +400,16 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             prev_volume = float(klines_1h[-2][7]) if len(klines_1h) >= 2 else 1.0
             vol_velocity = (float(klines_1h[-1][7]) - prev_volume) / prev_volume if prev_volume > 0 else 0.0
 
-            std_dev_20 = calculate_std_dev(hourly_closes, 20)
-            bb_upper = calculate_ma(hourly_closes, 20) + (2.0 * std_dev_20)
-            bb_lower = calculate_ma(hourly_closes, 20) - (2.0 * std_dev_20)
-            kc_upper = calculate_ma(hourly_closes, 20) + (1.5 * atr)
-            kc_lower = calculate_ma(hourly_closes, 20) - (1.5 * atr)
-            is_squeeze = (bb_upper < kc_upper) and (bb_lower > kc_lower)
+            # ==============================================================================
+            # INTEGRASI OPTIMASI SINGLE-PASS (MENGGANTIKAN PERHITUNGAN BB & KC MANUAL)
+            # ==============================================================================
+            ma20_hourly, bb_upper, bb_lower, kc_upper, kc_lower, is_squeeze = calculate_technical_envelope_single_pass(
+                prices=hourly_closes,
+                atr=atr,
+                period=20,
+                num_std_dev=2.0,
+                num_atr_mult=1.5
+            )
 
             is_bullish_div = False
             if len(hourly_closes) >= 10 and max(hourly_closes[-10:]) != min(hourly_closes[-10:]):
