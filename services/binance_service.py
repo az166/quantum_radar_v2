@@ -1,4 +1,5 @@
 import asyncio
+import httpx  # Pastikan httpx diimpor untuk konfigurasi timeout yang benar
 from config import COIN_BLACKLIST
 
 async def check_bitcoin_circuit_breaker(client):
@@ -6,9 +7,12 @@ async def check_bitcoin_circuit_breaker(client):
         url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=48"
         url_5m = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=6"
 
+        # Gunakan httpx.Timeout untuk membatasi durasi total pembacaan data maksimal 4 detik
+        strict_timeout = httpx.Timeout(4.0, connect=2.0, read=4.0)
+
         res_1h, res_5m = await asyncio.gather(
-            client.get(url, timeout=4), 
-            client.get(url_5m, timeout=4)
+            client.get(url, timeout=strict_timeout), 
+            client.get(url_5m, timeout=strict_timeout)
         )
 
         if res_1h.status_code == 200 and res_5m.status_code == 200:
@@ -30,7 +34,7 @@ async def check_bitcoin_circuit_breaker(client):
                     c_open = float(klines[i][1])
                     c_close = float(klines[i][4])
                     local_returns.append((c_close - c_open) / c_open)
-                except:
+                except Exception:
                     pass
 
             if btc_flash_change <= -1.0:
@@ -43,14 +47,20 @@ async def check_bitcoin_circuit_breaker(client):
                 status = {"is_safe": True, "reason": "BTC SAFE"}
 
             return status, local_returns
+        else:
+            print(f"[BTC WARNING] Binance returned status: {res_1h.status_code} / {res_5m.status_code}")
+
     except Exception as e:
         print(f"Error checking BTC status: {e}")
-    return {"is_safe": True, "reason": "BTC CHECK DELAYED"}, []
+        
+    # Pastikan jika API gagal / timeout, fungsi ini langsung melepaskan antrean dengan data fallback
+    return {"is_safe": True, "reason": "BTC CHECK DELAYED (TIMEOUT)"}, []
 
 async def get_combined_tickers_data_async(client, global_portfolio_dynamics):
     url = "https://api.binance.com/api/v3/ticker/24hr"
     try:
-        response = await client.get(url, timeout=5)
+        strict_timeout = httpx.Timeout(5.0, connect=2.0, read=5.0)
+        response = await client.get(url, timeout=strict_timeout)
         if response.status_code == 200:
             all_tickers = response.json()
             ticker_dict = {}
@@ -94,17 +104,19 @@ async def get_combined_tickers_data_async(client, global_portfolio_dynamics):
 async def fetch_klines_safely_async(client, symbol, interval, limit):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
     try:
-        response = await client.get(url, timeout=5)
+        strict_timeout = httpx.Timeout(5.0, connect=2.0, read=5.0)
+        response = await client.get(url, timeout=strict_timeout)
         if response.status_code == 200: 
             return response.json()
-    except: 
-        pass
+    except Exception as e:
+        print(f"[KLINES ERROR] Fetch {symbol} failed: {e}")
     return None
 
 async def fetch_order_book_imbalance(client, symbol):
     url = f"https://api.binance.com/api/v3/depth?symbol={symbol}&limit=20"
     try:
-        response = await client.get(url, timeout=3)
+        strict_timeout = httpx.Timeout(3.0, connect=1.5, read=3.0)
+        response = await client.get(url, timeout=strict_timeout)
         if response.status_code == 200:
             depth = response.json()
             bids_vol = sum(float(b[1]) for b in depth.get('bids', []))
@@ -112,6 +124,6 @@ async def fetch_order_book_imbalance(client, symbol):
             if asks_vol == 0: 
                 return 2.0
             return bids_vol / asks_vol
-    except:
+    except Exception:
         pass
     return 1.0
