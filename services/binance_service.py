@@ -4,8 +4,8 @@ from config import COIN_BLACKLIST
 
 async def check_bitcoin_circuit_breaker(client):
     try:
-        url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=48"
-        url_5m = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=6"
+        url = "https://api2.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1h&limit=48"
+        url_5m = "https://api2.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=6"
 
         # Timeout dihapus (diatur ke None) agar sistem menunggu respons tanpa batas waktu
         res_1h, res_5m = await asyncio.gather(
