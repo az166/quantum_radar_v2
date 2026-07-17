@@ -3,4 +3,6 @@ httpx==0.27.0
 asyncio==3.4.3
 gunicorn==21.2.0
 numpy
+pip install python-dotenv
+
 
