@@ -1,9 +1,20 @@
 # Set pencarian cepat O(1) untuk menyaring koin hitam (Blacklist)
 COIN_BLACKLIST = {'UPUSDT', 'DOWNUSDT', 'BUSDUSDT', 'USDCUSDT', 'FDUSDUSDT', 'EURUSDT'}
 
-# TELEGRAM BOT CONFIGURATION
-TELEGRAM_TOKEN = "8802329081:AAG6dapmRCz4jtFEmV-ABwAZUk2Wk51aNjc"
-TELEGRAM_CHAT_ID = "@cryptoradar_quantum"
+import os
+from dotenv import load_dotenv
+
+# Memuat variabel dari file .env
+load_dotenv()
+
+# Membaca token dengan aman menggunakan os.getenv
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "@cryptoradar_quantum")
+
+# Pengaman tambahan jika file .env lupa belum terisi
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN belum terkonfigurasi di dalam file .env")
+
 
 # Engine configuration
 CACHE_TTL_SECONDS = 120
