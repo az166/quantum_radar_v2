@@ -8,7 +8,7 @@ async def check_bitcoin_circuit_breaker(client):
         url_5m = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=6"
 
         # Gunakan httpx.Timeout untuk membatasi durasi total pembacaan data maksimal 4 detik
-        strict_timeout = httpx.Timeout(4.0, connect=2.0, read=4.0)
+        strict_timeout = httpx.Timeout(15.0, connect=2.0, read=15.0)
 
         res_1h, res_5m = await asyncio.gather(
             client.get(url, timeout=strict_timeout), 
