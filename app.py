@@ -115,17 +115,13 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
 def run_loop_in_bg():
     while True:
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(execute_one_market_scan())
+            # Menjalankan pemindaian secara terisolasi di background thread
+            asyncio.run(execute_one_market_scan())
         except Exception as e:
             print(f"Background Loop Error: {e}")
-        finally:
-            try:
-                loop.close()
-            except:
-                pass
-        time.sleep(15)  
+        
+        # Dinaikkan menjadi 30 detik untuk menghindari ban IP (HTTP 418) dari Binance di server Render
+        time.sleep(30)  
 
 @app.before_request
 def trigger_engine_startup():
@@ -155,24 +151,13 @@ def get_data():
     except Exception as e:
         print(f"Failed to synchronize device dynamic cache: {e}")
 
-    # 2. Bootstrapping Cepat jika Cache Kosong
-    with state.lock:
-        cache_empty = not state.market_data_cache
+    # =========================================================================
+    # REVISI PENTING: Bagian fast bootstrapping dihapus sepenuhnya dari sini.
+    # Seluruh pengambilan data pasar kini hanya dikelola secara tertib oleh
+    # background loop (run_loop_in_bg) untuk mencegah penumpukan request (HTTP 418).
+    # =========================================================================
 
-    if cache_empty:
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(execute_one_market_scan(target_device_id=device_id, minimal_bootstrap=True))
-        except Exception as e:
-            print(f"Fast bootstrap failed: {e}")
-        finally:
-            try:
-                loop.close()
-            except:
-                pass
-
-    # 3. Pengolahan Data Pasar Terpadu & Kalkulasi Kuantitatif
+    # 2. Pengolahan Data Pasar Terpadu & Kalkulasi Kuantitatif
     try:
         with state.lock:
             active_portfolio = dict(state.portfolio_dynamics.get(device_id, {}))
