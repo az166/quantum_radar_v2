@@ -4,5 +4,5 @@ asyncio==3.4.3
 gunicorn==21.2.0
 numpy
 python-dotenv
-
-
+uvicorn==0.30.1
+nest-asyncio==1.6.0
