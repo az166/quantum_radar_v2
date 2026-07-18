@@ -133,10 +133,11 @@
         function formatQuantumPrice(val) {
             if (val === undefined || val === null || isNaN(val)) return "-";
             if (val === 0) return "$0.00";
-            if (val < 1.0) {
-                return "$" + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 });
+            const num = parseFloat(val);
+            if (num < 1.0) {
+                return "$" + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 8 });
             } else {
-                return "$" + val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+                return "$" + num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
             }
         }
 
@@ -262,15 +263,18 @@
                             cachedCoin.pnl_val = cachedCoin.current_value - initialVal;
                             cachedCoin.pnl_pct = (cachedCoin.pnl_val / initialVal) * 100;
 
-                            if (livePrice >= cachedCoin.tp) cachedCoin.status_aksi = "TAKE PROFIT";
-                            else if (livePrice <= cachedCoin.cl) cachedCoin.status_aksi = "CUT LOSS";
-                            else cachedCoin.status_aksi = "HOLDING";
+                            // Hanya mengubah status jika siklus perdagangan aktif (bukan watchlist/strong buy awal)
+                            if (cachedCoin.status_aksi === "HOLDING" || cachedCoin.status_aksi === "TAKE PROFIT" || cachedCoin.status_aksi === "CUT LOSS") {
+                                if (livePrice >= cachedCoin.tp) cachedCoin.status_aksi = "TAKE PROFIT";
+                                else if (livePrice <= cachedCoin.cl) cachedCoin.status_aksi = "CUT LOSS";
+                                else cachedCoin.status_aksi = "HOLDING";
+                            }
                         }
 
                         updateSingleRowDOM(cachedCoin);
                     }
                 } catch (err) {
-                    // Fail-safe untuk mengabaikan parsing error pada stream cepat
+                    // Fail-safe untuk stream cepat
                 }
             };
 
@@ -296,7 +300,7 @@
                 `;
             }
 
-            // 2. Perbarui Kolom Plan Status
+            // 2. Perbarui Kolom Plan Status (Disinkronkan dengan Modul v4 - Fix Variabel Scope)
             const statusSpan = tr.querySelector('.cell-plan-status span');
             if (statusSpan) {
                 let statusBadgeClass = 'border-gray-800 text-gray-400';
@@ -309,7 +313,7 @@
                 statusSpan.innerText = `● ${coin.status_aksi}`;
             }
 
-            // 3. Perbarui Kolom Progress Bar & PnL Akurat
+            // 3. Perbarui Kolom Progress Bar & PnL Akurat (Fix Variabel dari cachedCoin -> coin)
             const performanceTd = tr.querySelector('.cell-performance');
             if (performanceTd && coin.is_portfolio && coin.entry > 0) {
                 let progressPct = 0;
@@ -368,11 +372,12 @@
                     faseLabel = "❌ " + faseLabel;
                 }
 
-                // Pengkondisian warna visual untuk teks modul prediktif baru
                 let trendLabel = coin.prediksi_tren || "CALCULATING TENDENCY";
                 let trendColorClass = 'text-slate-400';
                 if (trendLabel.includes("BULLISH")) trendColorClass = 'text-emerald-400 font-semibold';
                 if (trendLabel.includes("BEARISH")) trendColorClass = 'text-rose-400 font-semibold';
+                
+                let probabilitasStr = coin.probabilitas_prediksi || "50.0%";
 
                 let progressPct = 0;
                 if (coin.tp > coin.entry && coin.harga >= coin.entry) {
@@ -409,12 +414,12 @@
                         <div class="text-gray-400 truncate">Cost: <span class="text-gray-200">${formatQuantumPrice(coin.entry)}</span></div>
                         <div class="text-emerald-400 font-bold mt-0.5 truncate">TP: <span>${formatQuantumPrice(coin.tp)}</span></div>
                         <div class="text-rose-400 font-bold mt-0.5 truncate">CL: <span>${formatQuantumPrice(coin.cl)}</span></div>
-                        <div class="font-mono mt-1 text-xs px-2 py-0.5 border rounded block text-right border-cyan-500/40 text-cyan-400 bg-cyan-950/20 truncate" title="Projected: ${formatQuantumPrice(coin.proyeksi_bawah)} - ${formatQuantumPrice(coin.proyeksi_atas)}">
+                        <div class="font-mono mt-1 text-xs px-2 py-0.5 border rounded block text-right border-cyan-500/40 text-cyan-400 bg-cyan-950/20 truncate" title="Projected Range: ${formatQuantumPrice(coin.proyeksi_bawah)} - ${formatQuantumPrice(coin.proyeksi_atas)}">
                             ${formatQuantumPrice(coin.saran_entry)}
                         </div>
                     `;
                 } else {
-                    const isPullbackMode = coin.fase.includes("WEAK VOL");
+                    const isPullbackMode = coin.fase && coin.fase.includes("WEAK VOL");
                     const entryColor = isPullbackMode ? 'text-amber-400 border-amber-900 bg-amber-950/20' : 'text-cyan-400 border-cyan-900 bg-cyan-950/20';
                     const labelPrefix = isPullbackMode ? '🎯 DIP' : '🚀 ENTRY';
 
@@ -438,9 +443,8 @@
                                 <span class="text-[10px] bg-cyan-950/50 text-cyan-400 border border-cyan-900 px-1 rounded font-mono flex-shrink-0">S:${coin.skor}</span>
                             </div>
                             <div class="text-xs ${faseColorClass} mt-1 uppercase tracking-wider font-semibold truncate" title="${faseLabel}">${faseLabel}</div>
-                            <!-- Implementasi UI Tambahan untuk Menampilkan Arah Tren Prediktif -->
-                            <div class="text-[11px] ${trendColorClass} mt-0.5 truncate" title="Prediction: ${trendLabel} (${coin.probabilitas_prediksi})">
-                                🔮 ${trendLabel} <span class="text-slate-500">(${coin.probabilitas_prediksi})</span>
+                            <div class="text-[11px] ${trendColorClass} mt-0.5 truncate" title="Prediction: ${trendLabel} (${probabilitasStr})">
+                                🔮 ${trendLabel} <span class="text-slate-500">(${probabilitasStr})</span>
                             </div>
                         </td>
                         <td class="p-4 font-mono overflow-hidden cell-live-price">
