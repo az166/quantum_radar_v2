@@ -5,6 +5,16 @@ from flask import Flask, render_template, jsonify, request
 import httpx
 import asyncio
 import numpy as np
+import nest_asyncio
+
+# Pengaman mutlak agar pipeline async tetap berjalan di dalam worker sync Gunicorn
+nest_asyncio.apply()
+
+# Loop bawaan diatur agar selalu siap menangani proses pipeline coin
+try:
+    asyncio.get_event_loop()
+except RuntimeError:
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
 from config import CACHE_TTL_SECONDS
 from services.binance_service import (
