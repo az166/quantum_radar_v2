@@ -15,7 +15,6 @@ from services.telegram_service import send_telegram_in_worker_thread
 # ==============================================================================
 # DATA CACHE STORE (MULTI-TIER CACHING)
 # ==============================================================================
-# Menyimpan data kline di RAM untuk menghindari pembatasan laju panggilan (rate limit) Binance
 _kline_cache = {}
 
 async def fetch_klines_cached(client, symbol, interval, limit, ttl_seconds):
@@ -104,13 +103,63 @@ class TradingPerformanceLogger:
         exit_time = current_time if current_time else datetime.now().isoformat()
         await asyncio.to_thread(self._write_close_to_file, symbol, exit_price, exit_time)
 
-# Inisialisasi Logger Global
 perf_logger = TradingPerformanceLogger()
 
 
 # ==============================================================================
-# 2. QUANTITATIVE HELPER FUNCTIONS (VEKTORISASI NUMPY & OPTIMASI)
+# 2. QUANTITATIVE & PREDICTIVE FUNCTIONS (Vektorasi & Proyeksi Tren)
 # ==============================================================================
+def prediksi_arah_tren(klines_1h, atr_sekarang, vol_spike_ratio):
+    """
+    Modul Analisis Prediktif: Menghitung kecepatan momentum, akselerasi tren,
+    serta probabilitas kelanjutan atau pembalikan tren di masa depan.
+    """
+    if not klines_1h or len(klines_1h) < 10:
+        return "NEUTRAL", 50.0, 0.0, 0.0
+
+    closes = [float(k[4]) for k in klines_1h]
+    volumes = [float(k[7]) for k in klines_1h]
+    live_price = closes[-1]
+
+    # 1. Mengukur Kecepatan & Akselerasi Perubahan Harga
+    momentum_sekarang = closes[-1] - closes[-3]
+    momentum_sebelumnya = closes[-3] - closes[-6]
+    akselerasi_tren = momentum_sekarang - momentum_sebelumnya
+
+    # 2. Mengukur Kecepatan Aliran Volume Jangka Pendek vs Panjang
+    vol_ma_pendek = np.mean(volumes[-3:])
+    vol_ma_panjang = np.mean(volumes[-10:])
+    volume_velocity = vol_ma_pendek / vol_ma_panjang if vol_ma_panjang > 0 else 1.0
+
+    # 3. Klasifikasi Matriks Prediksi & Kalkulasi Probabilitas Keberhasilan
+    prediksi_tren = "SIDEWAYS / REGRESSION"
+    probabilitas_sukses = 50.0
+
+    if akselerasi_tren > 0 and vol_spike_ratio > 1.3:
+        if momentum_sekarang > 0:
+            prediksi_tren = "PREDICTIVE BULLISH CONTINUATION"
+            probabilitas_sukses = min(65.0 + (volume_velocity * 4), 92.0)
+        else:
+            prediksi_tren = "POTENTIAL REVERSAL UP (BOTTOMING)"
+            probabilitas_sukses = 58.0
+    elif akselerasi_tren < 0 or (momentum_sekarang < 0 and volume_velocity > 1.2):
+        if momentum_sekarang < 0:
+            prediksi_tren = "PREDICTIVE BEARISH CONTINUATION"
+            probabilitas_sukses = min(68.0 + (volume_velocity * 3), 95.0)
+        else:
+            prediksi_tren = "POTENTIAL TOPPING / BULL TRAP"
+            probabilitas_sukses = 62.0
+
+    # 4. Proyeksi Target Batas Harga Masa Depan Berdasarkan ATR Efektif
+    if "BULLISH" in prediksi_tren or "UP" in prediksi_tren:
+        proyeksi_atas = live_price + (atr_sekarang * 1.5)
+        proyeksi_bawah = live_price - (atr_sekarang * 0.75)
+    else:
+        proyeksi_atas = live_price + (atr_sekarang * 0.75)
+        proyeksi_bawah = live_price - (atr_sekarang * 1.5)
+
+    return prediksi_tren, round(probabilitas_sukses, 1), round(proyeksi_atas, 4), round(proyeksi_bawah, 4)
+
 def detect_fair_value_gap(klines_1h):
     if len(klines_1h) < 3:
         return False, 0.0
@@ -141,10 +190,6 @@ def calculate_volume_metrics(klines_1h, window=20):
     return round(z_score, 2), round(percentile, 1), round(vol_spike_ratio, 2)
 
 def analyze_market_structure(klines_1h, window=5):
-    """
-    Menganalisis struktur pasar menggunakan vektorisasi NumPy.
-    Mengeliminasi perulangan lambat Python untuk deteksi swing high dan swing low.
-    """
     n = len(klines_1h)
     if n < 30:
         return "CONSOLIDATION", 0.0, 0.0
@@ -153,7 +198,6 @@ def analyze_market_structure(klines_1h, window=5):
     lows = np.array([float(k[3]) for k in klines_1h])
     closes = np.array([float(k[4]) for k in klines_1h])
 
-    # Deteksi puncak (Swing High) dan lembah (Swing Low) secara simultan menggunakan pergeseran array
     is_swing_high = np.ones(n, dtype=bool)
     is_swing_low = np.ones(n, dtype=bool)
 
@@ -165,7 +209,6 @@ def analyze_market_structure(klines_1h, window=5):
         is_swing_high &= (highs >= shifted_high)
         is_swing_low &= (lows <= shifted_low)
 
-    # Singkirkan elemen ujung yang terkena efek perputaran indeks dari np.roll
     valid_range = (np.arange(n) >= window) & (np.arange(n) < n - window)
     swing_high_indices = np.where(is_swing_high & valid_range)[0]
     swing_low_indices = np.where(is_swing_low & valid_range)[0]
@@ -173,7 +216,6 @@ def analyze_market_structure(klines_1h, window=5):
     if len(swing_high_indices) < 2 or len(swing_low_indices) < 2:
         return "CONSOLIDATION", float(np.max(highs[-10:])), float(np.min(lows[-10:]))
 
-    # Ambil nilai puncak dan lembah terakhir serta sebelumnya
     last_sh = float(highs[swing_high_indices[-1]])
     prev_sh = float(highs[swing_high_indices[-2]])
     last_sl = float(lows[swing_low_indices[-1]])
@@ -338,12 +380,11 @@ def hitung_matriks_atr_dinamis(live_price, entry_price, atr, vol_spike_ratio, wh
 # ==============================================================================
 async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, semaphore, state_manager, device_id="default_guest_device"):
     async with semaphore:
-        # Pipa Pengambilan Data Multi-Tier Caching (Sangat Menghemat I/O Jaringan)
-        task_1w = fetch_klines_cached(client, symbol, '1w', 4, ttl_seconds=7200)    # Simpan 2 Jam
-        task_1d = fetch_klines_cached(client, symbol, '1d', 105, ttl_seconds=3600)  # Simpan 1 Jam
-        task_1h = fetch_klines_cached(client, symbol, '1h', 60, ttl_seconds=300)    # Simpan 5 Menit
-        task_15m = fetch_klines_cached(client, symbol, '15m', 10, ttl_seconds=60)   # Simpan 1 Menit
-        task_depth = fetch_order_book_imbalance(client, symbol)                     # Real-time (Tanpa Cache)
+        task_1w = fetch_klines_cached(client, symbol, '1w', 4, ttl_seconds=7200)    
+        task_1d = fetch_klines_cached(client, symbol, '1d', 105, ttl_seconds=3600)  
+        task_1h = fetch_klines_cached(client, symbol, '1h', 60, ttl_seconds=300)    
+        task_15m = fetch_klines_cached(client, symbol, '15m', 10, ttl_seconds=60)   
+        task_depth = fetch_order_book_imbalance(client, symbol)                     
 
         klines_1w, klines_1d, klines_1h, klines_15m, order_book_ratio = await asyncio.gather(
             task_1w, task_1d, task_1h, task_15m, task_depth
@@ -374,6 +415,13 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 
             vol_z_score, vol_percentile, vol_spike_ratio = calculate_volume_metrics(klines_1h, window=20)
 
+            # Eksekusi Indikator Prediksi Tren & Proyeksi Range Batas Harga
+            prediksi_tren, probabilitas_prediksi, proyeksi_atas, proyeksi_bawah = prediksi_arah_tren(
+                klines_1h=klines_1h, 
+                atr_sekarang=atr, 
+                vol_spike_ratio=vol_spike_ratio
+            )
+
             volatility_based_threshold = max(0.2, min(1.5, (atr / live_price) * 100 * 0.15)) if live_price > 0 else 0.4
 
             v_15m_curr = float(klines_15m[-1][7])
@@ -400,9 +448,6 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             prev_volume = float(klines_1h[-2][7]) if len(klines_1h) >= 2 else 1.0
             vol_velocity = (float(klines_1h[-1][7]) - prev_volume) / prev_volume if prev_volume > 0 else 0.0
 
-            # ==============================================================================
-            # INTEGRASI OPTIMASI SINGLE-PASS (MENGGANTIKAN PERHITUNGAN BB & KC MANUAL)
-            # ==============================================================================
             ma20_hourly, bb_upper, bb_lower, kc_upper, kc_lower, is_squeeze = calculate_technical_envelope_single_pass(
                 prices=hourly_closes,
                 atr=atr,
@@ -415,7 +460,6 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             if len(hourly_closes) >= 10 and max(hourly_closes[-10:]) != min(hourly_closes[-10:]):
                 is_bullish_div = detect_bullish_divergence(hourly_closes, hist_list, period=10)
 
-            # Perbaikan Struktur Pasar dengan Vektorisasi NumPy (Sangat Cepat di Level C)
             market_struct, last_sh, last_sl = await asyncio.to_thread(
                 analyze_market_structure, klines_1h, 5
             )
@@ -433,7 +477,8 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             market_liquidity_pool = m_data.get("pure_vol_24h", 0)
             required_vol_spike = 1.5 if market_liquidity_pool >= 50000000 else (3.5 if market_liquidity_pool <= 5000000 else 2.0)
 
-            body_to_range_ratio = abs(live_price - open_price) / max(0.0001, float(klines_1h[-1][2]) - float(klines_1h[-1][3]))
+            candle_range_denom = max(0.0001, float(klines_1h[-1][2]) - float(klines_1h[-1][3]))
+            body_to_range_ratio = abs(live_price - open_price) / candle_range_denom
             is_confirmed_breakout = (breakout_status == "CONFIRMED_BREAKOUT")
 
             is_whale_churning = (vol_spike_ratio > required_vol_spike * 1.5) and (body_to_range_ratio < 0.20)
@@ -466,20 +511,25 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 elif is_bullish_div and price_pct_1h > volatility_based_threshold:
                     fase = "🔄 MOMENTUM REVERSAL (BOTTOMING)"
 
-            # Pengiriman Telegram
+            # Pengiriman Telegram (Menyertakan Data Proyeksi Prediksi Tren Terkini)
             if state_manager.is_alert_state_differs(coin_name, fase):
                 if status_rencana_otomatis in ["STRONG_BUY", "STRONG BUY"] or fase in ["VALID BREAKOUT", "INSTITUTIONAL BUY", "⚡ SQUEEZE BREAKOUT (EARLY TREND)"]:
                     if btc_risk["allowed_trade"] or is_uncorrelated_or_decoupled:
                         emoji = "👑 BRAND NEW MSS BREAKOUT!" if fase == "INSTITUTIONAL BUY" else "🔥 BREAKOUT SPIKE"
                         fvg_info = f"\n⚠️ Fair Value Gap Spotted: Yes (Retest Area: ${fvg_target_price:.4f})" if has_fvg else ""
                         decouple_info = f"\n🔄 BTC Correlation: {btc_correlation:.2f} (Decoupled)" if is_uncorrelated_or_decoupled else f"\n🔄 BTC Correlation: {btc_correlation:.2f}"
-
+                        
                         harga_terformat = f"${live_price:.8f}" if live_price < 1.0 else f"${live_price:.4f}"
+                        fmt_atas = f"${proyeksi_atas:.8f}" if proyeksi_atas < 1.0 else f"${proyeksi_atas:.4f}"
+                        fmt_bawah = f"${proyeksi_bawah:.8f}" if proyeksi_bawah < 1.0 else f"${proyeksi_bawah:.4f}"
+
                         send_telegram_in_worker_thread(
                             f"{emoji}\n\nCoin: *{coin_name}*\nConfidence Score: `{momentum_score}/100` (`{status_rencana_otomatis}`)\n"
                             f"Vol Z-Score: `{vol_z_score}` (Pct: {vol_percentile}%)\n"
                             f"Structure: `{market_struct}` | Breakout: `{breakout_status}`\n"
                             f"Whale Dominance: `{whale_dominance}%`{decouple_info}{fvg_info}\n"
+                            f"🔮 *Trend Prediction*: `{prediksi_tren}` ({probabilitas_prediksi}%)\n"
+                            f"🎯 *Projected Range*: {fmt_bawah} - {fmt_atas}\n"
                             f"Live Price: *{harga_terformat}*"
                         )
                 state_manager.update_alert_state(coin_name, fase)
@@ -502,6 +552,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 highest_peak=current_peak
             )
 
+            # Log sinyal baru ke repositori json (sebelum status_rencana_otomatis ditimpa oleh manajemen portofolio)
             if status_rencana_otomatis == "STRONG BUY" and entry_price == 0:
                 await perf_logger.log_entry_signal_async(
                     symbol=symbol, entry_price=live_price, score=momentum_score, 
@@ -519,6 +570,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             else:
                 saran_entry = live_price - (0.5 * smoothed_atr)
 
+            # Evaluasi Aksi Portofolio Internal
             if entry_price > 0:
                 if live_price >= dynamic_tp: 
                     status_rencana_otomatis = "TAKE PROFIT"
@@ -544,7 +596,13 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 "amount": amount, "entry": entry_price, "tp": dynamic_tp, "cl": dynamic_cl,
                 "status_aksi": status_rencana_otomatis, "saran_entry": saran_entry,
                 "pnl_val": pnl_val, "pnl_pct": pnl_pct, "current_value": current_value,
-                "vol_velocity_pct": f"{round(vol_velocity * 100, 1)}%", "z_score": round(vol_z_score, 2)
+                "vol_velocity_pct": f"{round(vol_velocity * 100, 1)}%", "z_score": round(vol_z_score, 2),
+                
+                # Payload Output Tambahan Terintegrasi untuk Kebutuhan Tampilan UI Browser Chrome
+                "prediksi_tren": prediksi_tren,
+                "probabilitas_prediksi": f"{probabilitas_prediksi}%",
+                "proyeksi_atas": proyeksi_atas,
+                "proyeksi_bawah": proyeksi_bawah
             }
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
