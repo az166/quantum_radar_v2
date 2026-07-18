@@ -7,15 +7,8 @@ import asyncio
 import numpy as np
 import nest_asyncio
 
-# Pengaman mutlak agar pipeline async tetap berjalan di dalam thread Gunicorn
+# Pengaman agar komponen async bisa berjalan fleksibel di dalam arsitektur multi-thread
 nest_asyncio.apply()
-
-# Inisialisasi loop global agar persisten dan efisien
-try:
-    loop = asyncio.get_event_loop()
-except RuntimeError:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
 
 from config import CACHE_TTL_SECONDS
 from services.binance_service import (
@@ -24,8 +17,7 @@ from services.binance_service import (
 from services.engine import process_single_coin_pipeline, hitung_matriks_atr_dinamis
 from services.telegram_service import send_telegram_in_worker_thread
 
-# PERBAIKAN UTAMA: Menggunakan objek Flask murni (WSGI) tanpa pembungkus WsgiToAsgi
-# Ini akan menyelesaikan TypeError: WsgiToAsgi.__call__() missing 1 required positional argument: 'send'
+# Flask murni WSGI, seratus persen kompatibel dengan worker gthread Gunicorn
 app = Flask(__name__)
 
 class GlobalStateManager:
@@ -68,6 +60,7 @@ class GlobalStateManager:
 
 state = GlobalStateManager()
 ENGINE_INITIALIZED = False
+STARTUP_LOCK = Lock()  # Pengaman ekstra untuk mencegah balapan thread saat inisialisasi
 
 async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False):
     async with httpx.AsyncClient(
@@ -87,7 +80,7 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
             with state.lock:
                 dev_key = target_device_id if target_device_id else "default_guest_device"
                 portfolio_snapshot = copy.deepcopy(state.portfolio_dynamics.get(dev_key, {}))
-                
+
             ticker_master_data, prices_update = await get_combined_tickers_data_async(brass_client, portfolio_snapshot)
 
             if not ticker_master_data:
@@ -125,10 +118,12 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
             print(f"Error during core scan execution: {e}")
 
 def run_loop_in_bg():
-    asyncio.set_event_loop(loop)
+    """Membuat dan mengisolasi loop khusus untuk thread ini saja."""
+    local_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(local_loop)
     while True:
         try:
-            loop.run_until_complete(execute_one_market_scan())
+            local_loop.run_until_complete(execute_one_market_scan())
         except Exception as e:
             print(f"Background Loop Error: {e}")
         time.sleep(30)  
@@ -137,8 +132,11 @@ def run_loop_in_bg():
 def trigger_engine_startup():
     global ENGINE_INITIALIZED
     if not ENGINE_INITIALIZED:
-        Thread(target=run_loop_in_bg, daemon=True).start()
-        ENGINE_INITIALIZED = True
+        with STARTUP_LOCK:
+            # Pengecekan ganda di dalam lock untuk memastikan keamanan mutlak mutasi variabel
+            if not ENGINE_INITIALIZED:
+                Thread(target=run_loop_in_bg, daemon=True).start()
+                ENGINE_INITIALIZED = True
 
 @app.route('/')
 def index(): 
@@ -210,7 +208,9 @@ def get_data():
                     item["current_value"] = item["amount"] * item["harga"]
                     initial_val = item["amount"] * item["entry"]
                     item["pnl_val"] = item["current_value"] - initial_val
-                    item["pnl_pct"] = (item["pnl_val"] / initial_val) * 100
+                    
+                    # Pengaman pembagian nol
+                    item["pnl_pct"] = (item["pnl_val"] / initial_val) * 100 if initial_val > 0 else 0.0
 
                     if item["harga"] >= item["tp"]: 
                         item["status_aksi"] = "TAKE PROFIT"
