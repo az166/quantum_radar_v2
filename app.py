@@ -266,33 +266,46 @@ def get_data():
 @app.route('/api/telegram/send_manual', methods=['POST'])
 def send_manual_alert():
     try:
-        req = request.json
+        req = request.json or {}
+        
+        # Ekstraksi seluruh metrik kuantitatif adaptif
         coin = req.get("koin", "").strip().upper()
         fase = req.get("fase", "MONITORING")
         harga = float(req.get("harga", 0))
-        rasio = float(req.get("rasio", 0))
-        whale = float(req.get("whale", 0))
+        skor = req.get("skor", 0)
         status_aksi = req.get("status_aksi", "WAIT & SEE")
-        saran = float(req.get("saran_entry", 0))
+        z_score = req.get("z_score", 0.0)
+        rasio = float(req.get("rasio", 0))
+        whale = req.get("whale", 0)
+        
+        tren_pendek = req.get("tren_pendek", "SCANNING")
+        probabilitas = req.get("probabilitas_prediksi", "50.0%")
+        p_bawah = float(req.get("proyeksi_bawah", 0))
+        p_atas = float(req.get("proyeksi_atas", 0))
 
+        # Formatter format harga agar rapi
         harga_fmt = f"${harga:.8f}" if harga < 1.0 else f"${harga:.4f}"
-        saran_fmt = f"${saran:.8f}" if saran < 1.0 else f"${saran:.4f}"
+        fmt_atas = f"${p_atas:.8f}" if p_atas < 1.0 else f"${p_atas:.4f}"
+        fmt_bawah = f"${p_bawah:.8f}" if p_bawah < 1.0 else f"${p_bawah:.4f}"
 
+        # Membuat struktur template pesan identik dengan otomatis
         msg = (
             f"📢 *MANUAL QUANTUM SIGNAL ALERT*\n\n"
             f"Coin: *{coin}*\n"
-            f"Market Phase: {fase}\n"
-            f"Current Price: {harga_fmt}\n"
-            f"Vol vs MA20: {rasio:.1f}x\n"
-            f"Whale Dominance: {whale}%\n"
-            f"Action Strategy: *{status_aksi}*\n"
-            f"Suggested Entry Trigger: {saran_fmt}"
+            f"Confidence Score: `{skor}/100` (`{status_aksi}`)\n"
+            f"Vol Z-Score: `{z_score}` (Rasio: {rasio:.1f}x)\n"
+            f"Whale Dominance: `{whale}%`\n"
+            f"Market Phase: *{fase}*\n\n"
+            f"🔮 *Trend Prediction*: `{tren_pendek}` ({probabilitas})\n"
+            f"🎯 *Projected Range*: {fmt_bawah} - {fmt_atas}\n"
+            f"Live Price: *{harga_fmt}*"
         )
 
         send_telegram_in_worker_thread(msg)
-        return jsonify({"status": "success", "message": "Signal broadcast initiated!"})
+        return jsonify({"status": "success", "message": "Manual signal broadcast initiated!"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=False)
