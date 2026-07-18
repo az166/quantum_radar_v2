@@ -3,6 +3,7 @@ import numpy as np
 import os
 import json
 import time
+from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from math import exp
 from utils.indicators import (
@@ -229,45 +230,42 @@ def prediksi_arah_tren(klines_1w, klines_1d, klines_1h, klines_15m, atr_sekarang
 
     return prediksi_tren, round(probabilitas_sukses, 1), proyeksi_atas, proyeksi_bawah
 
-def detect_fair_value_gap(klines_1h, min_gap_pct=0.001):
-    if len(klines_1h) < 3:
-        return Fals, 0.0
+def detect_fair_value_gap(klines_1h, min_gap_pct=Decimal("0.001")):
+    """
+    Mendeteksi Bullish/Bearish Fair Value Gap (FVG).
 
-    c1 = klines_1h[-3]
-    c2 = klines_1h[-2]
-    c3 = klines_1h[-1]
-
-    high1 = float(c1[2])
-    low1 = float(c1[3])
-
-    high3 = float(c3[2])
-    low3 = float(c3[3])
-
-    # Bullish FVG
-    if low3 > high1:
-        gap = low3 - high1
-        if gap / high1 >= min_gap_pct:
-            return {
-                "type": "bullish",
-                "gap_top": low3,
-                "gap_bottom": high1,
-                "midpoint": (low3 + high1) / 2,
-                "gap_size": gap
+    Return:
+        Jika ditemukan:
+            {
+                "type": "bullish" / "bearish",
+                "gap_top": float,
+                "gap_bottom": float,
+                "midpoint": float,
+                "gap_size": float,
+                "gap_ratio": float
             }
 
-    # Bearish FVG
-    if high3 < low1:
-        gap = low1 - high3
-        if gap / low1 >= min_gap_pct:
-            return {
-                "type": "bearish",
-                "gap_top": low1,
-                "gap_bottom": high3,
-                "midpoint": (low1 + high3) / 2,
-                "gap_size": gap
-            }
+        Jika tidak ditemukan:
+            (False, 0.0)
+    """
 
-    return False, 0.0
+    if not klines_1h or len(klines_1h) < 3:
+        return False, 0.0
+
+    try:
+        c1 = klines_1h[-3]
+        c2 = klines_1h[-2]  # Disiapkan jika nanti ingin menambah filter displacement
+        c3 = klines_1h[-1]
+
+        high1 = Decimal(str(c1[2]))
+        low1 = Decimal(str(c1[3]))
+
+        high3 = Decimal(str(c3[2]))
+        low3 = Decimal(str(c3[3]))
+
+    except (IndexError, InvalidOperation, ValueError, TypeError):
+        return False, 0.0
+
 
 def calculate_volume_metrics(klines_1h, window=20):
     if len(klines_1h) < window + 1:
