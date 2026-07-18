@@ -107,12 +107,12 @@ perf_logger = TradingPerformanceLogger()
 
 
 # ==============================================================================
-# 2. QUANTITATIVE & PREDICTIVE FUNCTIONS (Advanced Predictive Engine)
+# 2. QUANTITATIVE & PREDICTIVE FUNCTIONS (Advanced Predictive Engine v3)
 # ==============================================================================
-def prediksi_arah_tren(klines_1h, klines_15m, atr_sekarang, vol_spike_ratio, is_squeeze, is_confirmed_breakout, is_15m_volume_burst, btc_correlation, btc_risk_level):
+def prediksi_arah_tren(klines_1h, klines_15m, atr_sekarang, vol_spike_ratio, is_squeeze, is_confirmed_breakout, is_15m_volume_burst, btc_correlation, btc_risk_level, pure_vol_24h=20000000):
     """
-    Modul Analisis Prediktif v2: Menghitung kecepatan momentum, akselerasi lintas timeframe,
-    serta probabilitas kelanjutan atau pembalikan tren adaptif berbasis risiko BTC.
+    Modul Analisis Prediktif v3: Menghitung kecepatan momentum, akselerasi lintas timeframe dengan
+    bobot Exponential Time-Decay volume, serta filter volatilitas ekstrem menggunakan Relative ATR Ratio.
     """
     if not klines_1h or len(klines_1h) < 10 or not klines_15m or len(klines_15m) < 4:
         return "NEUTRAL", 50.0, 0.0, 0.0
@@ -123,19 +123,32 @@ def prediksi_arah_tren(klines_1h, klines_15m, atr_sekarang, vol_spike_ratio, is_
 
     closes_15m = [float(k[4]) for k in klines_15m]
 
-    # 1. Mengukur Kecepatan & Akselerasi Perubahan Harga Jangka Pendek (1H)
+    # 1. Perhitungan Volatilitas Relatif (Relative ATR Ratio)
+    relative_atr = (atr_sekarang / live_price) * 100 if live_price > 0 else 0.0
+
+    # 2. Mengukur Kecepatan & Akselerasi Perubahan Harga Jangka Pendek (1H)
     momentum_1h_curr = closes_1h[-1] - closes_1h[-3]
     momentum_1h_prev = closes_1h[-3] - closes_1h[-6]
     akselerasi_1h = momentum_1h_curr - momentum_1h_prev
 
-    # 2. Deteksi Reversal Mikro Awal Lintas Timeframe (15M)
+    # Deteksi Reversal Mikro Awal Lintas Timeframe (15M)
     momentum_15m_curr = closes_15m[-1] - closes_15m[-3]
     is_15m_micro_turning_up = momentum_15m_curr > 0 and (closes_15m[-1] > closes_15m[-2])
 
-    # 3. Mengukur Kecepatan Aliran Volume Jangka Pendek vs Panjang
-    vol_ma_pendek = np.mean(volumes_1h[-3:])
-    vol_ma_panjang = np.mean(volumes_1h[-10:])
-    volume_velocity = vol_ma_pendek / vol_ma_panjang if vol_ma_panjang > 0 else 1.0
+    # 3. Mengukur Kecepatan Aliran Volume Berbasis Time-Decay (Exponential Weight)
+    # Proteksi guard-rail untuk memastikan kecocokan ukuran dimensi array data historis
+    slices_pendek = min(3, len(volumes_1h))
+    slices_panjang = min(10, len(volumes_1h))
+
+    weights_pendek = np.array([0.2, 0.3, 0.5][-slices_pendek:])
+    weights_pendek /= weights_pendek.sum()
+
+    weights_panjang = np.exp(np.linspace(-1, 0, slices_panjang))
+    weights_panjang /= weights_panjang.sum()
+
+    vol_ema_pendek = np.sum(np.array(volumes_1h[-slices_pendek:]) * weights_pendek)
+    vol_ema_panjang = np.sum(np.array(volumes_1h[-slices_panjang:]) * weights_panjang)
+    volume_velocity = vol_ema_pendek / vol_ema_panjang if vol_ema_panjang > 0 else 1.0
 
     # 4. Klasifikasi Matriks Prediksi & Kalkulasi Probabilitas Keberhasilan
     prediksi_tren = "SIDEWAYS / REGRESSION"
@@ -149,7 +162,6 @@ def prediksi_arah_tren(klines_1h, klines_15m, atr_sekarang, vol_spike_ratio, is_
             prediksi_tren = "POTENTIAL REVERSAL UP (BOTTOMING)"
             probabilitas_sukses = 58.0
     elif akselerasi_1h < 0 or (momentum_1h_curr < 0 and volume_velocity > 1.2):
-        # Optimasi Aturan 1: Intervensi Timeframe 15M untuk menangkap Bottoming lebih cepat
         if momentum_1h_curr < 0 and is_15m_micro_turning_up and is_15m_volume_burst:
             prediksi_tren = "POTENTIAL REVERSAL UP (EARLY 15M ACCELERATION)"
             probabilitas_sukses = 60.0 + (vol_spike_ratio * 2)
@@ -160,30 +172,37 @@ def prediksi_arah_tren(klines_1h, klines_15m, atr_sekarang, vol_spike_ratio, is_
             prediksi_tren = "POTENTIAL TOPPING / BULL TRAP"
             probabilitas_sukses = 62.0
 
-    # Optimasi Aturan 3: Pembobotan Probabilitas Berdasarkan Korelasi & Risiko Makro BTC
+    # 5. Pembobotan Probabilitas Berdasarkan Korelasi & Risiko Makro BTC
     if "BULLISH" in prediksi_tren or "UP" in prediksi_tren:
         if btc_correlation > 0.70 and btc_risk_level >= 3:
-            probabilitas_sukses -= 18.0  # Pangkas jika korelasi tinggi saat BTC rusak
+            probabilitas_sukses -= 18.0
         elif btc_correlation < 0.20:
-            probabilitas_sukses += 5.0   # Beri bonus stabilitas jika koin ter-decoupled
+            probabilitas_sukses += 5.0
     else:
         if btc_correlation > 0.70 and btc_risk_level >= 3:
-            probabilitas_sukses += 12.0  # Naikkan probabilitas bearish mengikuti arah pasar induk
+            probabilitas_sukses += 12.0
+
+    # 6. Filter Volatilitas Ekstrem (Relative ATR Guard)
+    if relative_atr > 8.0:
+        probabilitas_sukses -= 10.0
 
     probabilitas_sukses = max(10.0, min(95.0, probabilitas_sukses))
 
-    # Optimasi Aturan 2: Dynamic ATR Banding (Pengali Target Squeeze vs Expansion Phase)
+    # 7. Dynamic ATR Banding (Pengali Target Squeeze vs Expansion Phase)
     if is_squeeze:
         mult_atas_bullish, mult_bawah_bullish = 1.1, 0.5
         mult_atas_bearish, mult_bawah_bearish = 0.5, 1.1
     elif is_confirmed_breakout:
-        mult_atas_bullish, mult_bawah_bullish = 2.5, 1.2
-        mult_atas_bearish, mult_bawah_bearish = 0.8, 1.8
+        vol_cap_ratio = pure_vol_24h / 100000000
+        boost_factor = min(1.5, max(1.0, vol_cap_ratio))
+        
+        mult_atas_bullish, mult_bawah_bullish = 2.5 * boost_factor, 1.2
+        mult_atas_bearish, mult_bawah_bearish = 0.8, 1.8 * boost_factor
     else:
         mult_atas_bullish, mult_bawah_bullish = 1.5, 0.75
         mult_atas_bearish, mult_bawah_bearish = 0.75, 1.5
 
-    # Eksekusi Proyeksi Target Batas Harga Masa Depan
+    # Eksekusi Proyeksi Target Batas Harga Masa Depan (Tanpa pembulatan statis dini agar presisi micro-caps aman)
     if "BULLISH" in prediksi_tren or "UP" in prediksi_tren:
         proyeksi_atas = live_price + (atr_sekarang * mult_atas_bullish)
         proyeksi_bawah = live_price - (atr_sekarang * mult_bawah_bullish)
@@ -191,7 +210,7 @@ def prediksi_arah_tren(klines_1h, klines_15m, atr_sekarang, vol_spike_ratio, is_
         proyeksi_atas = live_price + (atr_sekarang * mult_atas_bearish)
         proyeksi_bawah = live_price - (atr_sekarang * mult_bawah_bearish)
 
-    return prediksi_tren, round(probabilitas_sukses, 1), round(proyeksi_atas, 4), round(proyeksi_bawah, 4)
+    return prediksi_tren, round(probabilitas_sukses, 1), proyeksi_atas, proyeksi_bawah
 
 def detect_fair_value_gap(klines_1h):
     if len(klines_1h) < 3:
@@ -514,7 +533,7 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
 
             btc_risk = calculate_btc_risk_level(state_manager.btc_status, btc_returns_snapshot)
 
-            # Eksekusi Modul Prediktif v2 dengan Logika Konvergensi Lintas Timeframe & ATR Dinamis
+            # Eksekusi Modul Prediktif v3 dengan Logika Konvergensi Lintas Timeframe & ATR Dinamis
             prediksi_tren, probabilitas_prediksi, proyeksi_atas, proyeksi_bawah = prediksi_arah_tren(
                 klines_1h=klines_1h,
                 klines_15m=klines_15m,
@@ -524,7 +543,8 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 is_confirmed_breakout=is_confirmed_breakout,
                 is_15m_volume_burst=is_15m_volume_burst,
                 btc_correlation=btc_correlation,
-                btc_risk_level=btc_risk["level"]
+                btc_risk_level=btc_risk["level"],
+                pure_vol_24h=market_liquidity_pool
             )
 
             momentum_score, status_rencana_otomatis = calculate_confidence_score(
@@ -640,8 +660,8 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 # Payload Output Tambahan Terintegrasi untuk Kebutuhan Tampilan UI Browser
                 "prediksi_tren": prediksi_tren,
                 "probabilitas_prediksi": f"{probabilitas_prediksi}%",
-                "proyeksi_atas": proyeksi_atas,
-                "proyeksi_bawah": proyeksi_bawah
+                "proyeksi_atas": round(proyeksi_atas, 8) if live_price < 1.0 else round(proyeksi_atas, 4),
+                "proyeksi_bawah": round(proyeksi_bawah, 8) if live_price < 1.0 else round(proyeksi_bawah, 4)
             }
         except Exception as e:
             print(f"Error processing {symbol}: {e}")
