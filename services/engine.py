@@ -231,7 +231,7 @@ def prediksi_arah_tren(klines_1w, klines_1d, klines_1h, klines_15m, atr_sekarang
 
 def detect_fair_value_gap(klines_1h, min_gap_pct=0.001):
     if len(klines_1h) < 3:
-        return None
+        return Fals, 0.0
 
     c1 = klines_1h[-3]
     c2 = klines_1h[-2]
@@ -267,7 +267,8 @@ def detect_fair_value_gap(klines_1h, min_gap_pct=0.001):
                 "gap_size": gap
             }
 
-    return None
+    return False, 0.0
+
 def calculate_volume_metrics(klines_1h, window=20):
     if len(klines_1h) < window + 1:
         return 0.0, 50.0, 1.0
