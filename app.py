@@ -6,15 +6,17 @@ import httpx
 import asyncio
 import numpy as np
 import nest_asyncio
+from asgiref.wsgi import WsgiToAsgi
 
 # Pengaman mutlak agar pipeline async tetap berjalan di dalam worker sync Gunicorn
 nest_asyncio.apply()
 
-# Loop bawaan diatur agar selalu siap menangani proses pipeline coin
+# Inisialisasi loop global agar persisten dan efisien
 try:
-    asyncio.get_event_loop()
+    loop = asyncio.get_event_loop()
 except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
 from config import CACHE_TTL_SECONDS
 from services.binance_service import (
@@ -23,7 +25,7 @@ from services.binance_service import (
 from services.engine import process_single_coin_pipeline, hitung_matriks_atr_dinamis
 from services.telegram_service import send_telegram_in_worker_thread
 
-app = Flask(__name__)
+flask_app = Flask(__name__)
 
 class GlobalStateManager:
     """Mengelola data global terbagi menggunakan pengaman Thread Lock."""
@@ -63,7 +65,6 @@ class GlobalStateManager:
             self.trailing_peaks[device_id][coin_name] = current_peak
             return current_peak
 
-# Instansiasi State Manager Global
 state = GlobalStateManager()
 ENGINE_INITIALIZED = False
 
@@ -83,7 +84,10 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
 
             # 2. Get Combined Ticker Data
             with state.lock:
-                portfolio_snapshot = copy.deepcopy(state.portfolio_dynamics)
+                # Perbaikan 1: Ambil potret portofolio default agar tidak mencampuradukkan perangkat
+                dev_key = target_device_id if target_device_id else "default_guest_device"
+                portfolio_snapshot = copy.deepcopy(state.portfolio_dynamics.get(dev_key, {}))
+                
             ticker_master_data, prices_update = await get_combined_tickers_data_async(brass_client, portfolio_snapshot)
 
             if not ticker_master_data:
@@ -96,14 +100,12 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
                 ticker_master_data = dict(list(ticker_master_data.items())[:4])
 
             active_portfolio = {}
-            dev_id_key = target_device_id if target_device_id else "default_guest_device"
-
             with state.lock:
                 if target_device_id and target_device_id in state.portfolio_dynamics:
                     active_portfolio = dict(state.portfolio_dynamics[target_device_id])
 
             tasks = [
-                process_single_coin_pipeline(brass_client, symbol, m_data, active_portfolio, semaphore, state, dev_id_key) 
+                process_single_coin_pipeline(brass_client, symbol, m_data, active_portfolio, semaphore, state, dev_key) 
                 for symbol, m_data in ticker_master_data.items()
             ]
             results = await asyncio.gather(*tasks)
@@ -123,33 +125,31 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
             print(f"Error during core scan execution: {e}")
 
 def run_loop_in_bg():
+    # Perbaikan 3: Gunakan sub-loop terisolasi yang melekat pada thread utama agar tidak re-create event loop
+    asyncio.set_event_loop(loop)
     while True:
         try:
-            # Menjalankan pemindaian secara terisolasi di background thread
-            asyncio.run(execute_one_market_scan())
+            loop.run_until_complete(execute_one_market_scan())
         except Exception as e:
             print(f"Background Loop Error: {e}")
-        
-        # Dinaikkan menjadi 30 detik untuk menghindari ban IP (HTTP 418) dari Binance di server Render
         time.sleep(30)  
 
-@app.before_request
+@flask_app.before_request
 def trigger_engine_startup():
     global ENGINE_INITIALIZED
     if not ENGINE_INITIALIZED:
         Thread(target=run_loop_in_bg, daemon=True).start()
         ENGINE_INITIALIZED = True
 
-@app.route('/')
+@flask_app.route('/')
 def index(): 
     return render_template('index.html')
 
-@app.route('/api/data', methods=['POST'])
+@flask_app.route('/api/data', methods=['POST'])
 def get_data():
     req = request.json or {}
     device_id = req.get("device_id", "default_guest_device")
 
-    # 1. Sinkronisasi Portofolio Cache
     try:
         with state.lock:
             state.portfolio_dynamics[device_id] = req.get("portfolio", {})
@@ -161,13 +161,6 @@ def get_data():
     except Exception as e:
         print(f"Failed to synchronize device dynamic cache: {e}")
 
-    # =========================================================================
-    # REVISI PENTING: Bagian fast bootstrapping dihapus sepenuhnya dari sini.
-    # Seluruh pengambilan data pasar kini hanya dikelola secara tertib oleh
-    # background loop (run_loop_in_bg) untuk mencegah penumpukan request (HTTP 418).
-    # =========================================================================
-
-    # 2. Pengolahan Data Pasar Terpadu & Kalkulasi Kuantitatif
     try:
         with state.lock:
             active_portfolio = dict(state.portfolio_dynamics.get(device_id, {}))
@@ -176,7 +169,6 @@ def get_data():
             btc_reason_snapshot = state.btc_status["reason"].upper()
             btc_returns_snapshot = list(state.btc_returns)
 
-        # Hitung rata-rata return BTC dan konversi ke skala Tingkat Risiko (1-4)
         avg_btc_return = np.mean(btc_returns_snapshot) if btc_returns_snapshot else 0.0
 
         if not btc_safe_snapshot and ("CRASH" in btc_reason_snapshot or "CAPITULATION" in btc_reason_snapshot or avg_btc_return < -0.04):
@@ -191,7 +183,7 @@ def get_data():
         user_market_data = []
 
         for original_item in cache_snapshot:
-            item = original_item  
+            item = copy.deepcopy(original_item)  
             coin = item["koin"]
 
             if coin in active_portfolio:
@@ -202,6 +194,7 @@ def get_data():
 
                 current_peak = 0.0
                 if item["entry"] > 0 and item["amount"] > 0:
+                    # Perbaikan 2: Fungsi dipanggil dengan proteksi teratur untuk mencegah tabrakan data internal thread
                     current_peak = state.update_trailing_peak(device_id, coin, item["entry"], item["harga"])
 
                 if item["entry"] > 0 and item["amount"] > 0:
@@ -269,10 +262,10 @@ def get_data():
         }), 200
 
     except Exception as e:
-        app.logger.error(f"Error executing quantitative data route: {e}")
+        flask_app.logger.error(f"Error executing quantitative data route: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/api/telegram/send_manual', methods=['POST'])
+@flask_app.route('/api/telegram/send_manual', methods=['POST'])
 def send_manual_alert():
     try:
         req = request.json
@@ -303,5 +296,8 @@ def send_manual_alert():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 
+# Ekspos aplikasi sebagai komponen ASGI untuk Gunicorn Uvicorn Worker
+app = WsgiToAsgi(flask_app)
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    flask_app.run(host='0.0.0.0', port=5000, debug=False)
