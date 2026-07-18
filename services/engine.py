@@ -4,7 +4,7 @@ import os
 import json
 import time
 from datetime import datetime
-from math import exp, linspace
+from math import exp
 from utils.indicators import (
     calculate_ma, calculate_std_dev, calculate_obv_trend,
     detect_bullish_divergence, calculate_macd_efficient, calculate_pearson_correlation,
@@ -154,7 +154,7 @@ def prediksi_arah_tren(klines_1w, klines_1d, klines_1h, klines_15m, atr_sekarang
         vol_ema_pendek = sum(v_short) / slices_pendek
 
     v_long = volumes_1h[-slices_panjang:]
-    w_long = [exp(x) for x in linspace(-1, 0, slices_panjang)]
+    w_long = [exp(x) for x in np.linspace(-1, 0, slices_panjang)]
     w_long_sum = sum(w_long)
     vol_ema_panjang = sum(v * w for v, w in zip(v_long, w_long)) / w_long_sum if w_long_sum > 0 else 1.0
 
@@ -279,6 +279,7 @@ def analyze_market_structure(klines_1h, window=5):
     swing_high_indices = np.where(is_swing_high & valid_range)[0]
     swing_low_indices = np.where(is_swing_low & valid_range)[0]
 
+    # Perbaikan tipe data luaran agar seragam float saat data swing kosong
     if len(swing_high_indices) < 2 or len(swing_low_indices) < 2:
         return "CONSOLIDATION", float(np.max(highs[-10:])), float(np.min(lows[-10:]))
 
@@ -426,7 +427,12 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             live_price = state_manager.get_live_price(symbol, float(klines_1h[-1][4]))
             btc_returns_snapshot = state_manager.get_btc_returns()
 
+            # Optimal Impor Nilai Skalar untuk Perhitungan
             open_price = float(klines_1h[-1][1])
+            high_price = float(klines_1h[-1][2])
+            low_price = float(klines_1h[-1][3])
+            last_close_1h = float(klines_1h[-1][4])
+
             price_pct_1h = (((live_price - open_price) / open_price) * 100) if open_price > 0 else 0.0
             atr, spread_ratio = calculate_atr_and_spread(klines_1d, klines_1h)
 
@@ -468,15 +474,15 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
             market_struct, last_sh, last_sl = await asyncio.to_thread(analyze_market_structure, klines_1h, 5)
 
             breakout_status = verify_breakout_status(
-                live_price=live_price, last_close=float(klines_1h[-1][4]), open_price=open_price,
-                high_price=float(klines_1h[-1][2]), low_price=float(klines_1h[-1][3]),
+                live_price=live_price, last_close=last_close_1h, open_price=open_price,
+                high_price=high_price, low_price=low_price,
                 local_swing_high=last_sh, z_score=vol_z_score
             )
 
             market_liquidity_pool = m_data.get("pure_vol_24h", 0)
             required_vol_spike = 1.5 if market_liquidity_pool >= 50000000 else (3.5 if market_liquidity_pool <= 5000000 else 2.0)
 
-            candle_range_denom = max(0.0001, float(klines_1h[-1][2]) - float(klines_1h[-1][3]))
+            candle_range_denom = max(0.0001, high_price - low_price)
             body_to_range_ratio = abs(live_price - open_price) / candle_range_denom
             is_confirmed_breakout = (breakout_status == "CONFIRMED_BREAKOUT")
 
@@ -495,7 +501,6 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 btc_correlation=btc_correlation, btc_risk_level=btc_risk["level"], pure_vol_24h=market_liquidity_pool
             )
 
-            # Modul Ekstraksi Analisis Makro Jangka Panjang Terstruktur
             if w1_close >= w2_close and live_price > ma25_daily:
                 tren_panjang_skenario = "MACRO BULLISH STRUCTURE"
             elif w1_close < w2_close and live_price < ma25_daily:
@@ -597,7 +602,6 @@ async def process_single_coin_pipeline(client, symbol, m_data, user_portfolio, s
                 "pnl_val": pnl_val, "pnl_pct": pnl_pct, "current_value": current_value,
                 "vol_velocity_pct": f"{round(vol_velocity * 100, 1)}%", "z_score": round(vol_z_score, 2),
                 
-                # Sinkronisasi Output Kunci Prediksi Kuantum dengan Modul UI Dashboard
                 "tren_pendek": prediksi_tren.upper(),
                 "tren_panjang": tren_panjang_skenario.upper(),
                 "probabilitas_prediksi": f"{probabilitas_prediksi}%",
