@@ -111,6 +111,7 @@
         let currentTargetCoin = "";
         let globalCachedData = [];
         let binanceWS = null;
+        let currentActiveStreams = ""; 
 
         function getOrCreateDeviceID() {
             let id = localStorage.getItem('quantum_device_id');
@@ -162,7 +163,7 @@
 
             saveLocalPortfolio(portfolio);
             closeModal();
-            updateDashboardData();
+            updateDashboardData(true); // Force full re-render when structural data changes
         }
 
         function addNewCustomCoin() {
@@ -176,7 +177,7 @@
                 saveLocalPortfolio(portfolio);
             }
             coinInput.value = "";
-            updateDashboardData();
+            updateDashboardData(true); // Force full re-render
         }
 
         function deleteAssetFromCache() {
@@ -188,7 +189,7 @@
                 saveLocalPortfolio(portfolio);
             }
             closeModal();
-            updateDashboardData();
+            updateDashboardData(true); // Force full re-render
         }
 
         async function sendTelegramManual(btn, coinStr) {
@@ -228,7 +229,6 @@
 
         function handleSearchFilter() { renderTableRows(globalCachedData); }
 
-        // Menerjemahkan data secara adaptif dari API Backend Engine
         function extractTrendData(coin) {
             return {
                 shortTerm: coin.tren_pendek || coin.prediksi_tren || "SCANNING",
@@ -239,13 +239,18 @@
 
         // ==================== LIVE REALTIME WEBSOCKET MANAGER ====================
         function initBinanceWebSocket(coins) {
+            if (!coins || coins.length === 0) return;
+
+            const streams = coins.map(c => `${c.koin.toLowerCase()}usdt@ticker`).join('/');
+            
+            // Perbaikan: Hanya inisialisasi ulang jika susunan list koin berubah
+            if (binanceWS && currentActiveStreams === streams) return; 
+
             if (binanceWS) {
                 try { binanceWS.close(); } catch(e) {}
             }
 
-            if (!coins || coins.length === 0) return;
-
-            const streams = coins.map(c => `${c.koin.toLowerCase()}usdt@ticker`).join('/');
+            currentActiveStreams = streams;
             const wsUrl = `wss://stream.binance.com:9443/stream?streams=${streams}`;
 
             binanceWS = new WebSocket(wsUrl);
@@ -270,12 +275,15 @@
                             cachedCoin.current_value = cachedCoin.amount * livePrice;
                             const initialVal = cachedCoin.amount * cachedCoin.entry;
                             cachedCoin.pnl_val = cachedCoin.current_value - initialVal;
-                            cachedCoin.pnl_pct = (cachedCoin.pnl_val / initialVal) * 100;
+                            
+                            cachedCoin.pnl_pct = initialVal > 0 ? (cachedCoin.pnl_val / initialVal) * 100 : 0.0;
 
-                            if (cachedCoin.status_aksi === "HOLDING" || cachedCoin.status_aksi === "TAKE PROFIT" || cachedCoin.status_aksi === "CUT LOSS") {
-                                if (livePrice >= cachedCoin.tp) cachedCoin.status_aksi = "TAKE PROFIT";
-                                else if (livePrice <= cachedCoin.cl) cachedCoin.status_aksi = "CUT LOSS";
-                                else cachedCoin.status_aksi = "HOLDING";
+                            if (livePrice >= cachedCoin.tp) {
+                                cachedCoin.status_aksi = "TAKE PROFIT";
+                            } else if (livePrice <= cachedCoin.cl) {
+                                cachedCoin.status_aksi = "CUT LOSS";
+                            } else {
+                                cachedCoin.status_aksi = "HOLDING";
                             }
                         }
 
@@ -288,6 +296,7 @@
 
             binanceWS.onerror = (err) => { console.error("WebSocket Error: ", err); };
             binanceWS.onclose = () => {
+                currentActiveStreams = "";
                 setTimeout(() => { initBinanceWebSocket(globalCachedData); }, 5000);
             };
         }
@@ -485,7 +494,8 @@
             tbody.innerHTML = rowsHtml || `<tr><td colspan="7" class="p-8 text-center text-gray-500 font-mono">Asset not found...</td></tr>`;
         }
 
-        async function updateDashboardData() {
+        // Perbaikan Utama: Parameter forceRender mencegah tabel dibuat ulang dari nol jika hanya sinkronisasi berkala biasa
+        async function updateDashboardData(forceRender = false) {
             try {
                 let currentLocalPortfolio = getLocalPortfolio();
                 if (!currentLocalPortfolio || typeof currentLocalPortfolio !== 'object') {
@@ -506,7 +516,7 @@
 
                 if (!response.ok) {
                     document.getElementById('sync-status').innerText = 'SERVER ERROR (' + response.status + ')';
-                    setTimeout(updateDashboardData, 20000); 
+                    setTimeout(() => updateDashboardData(false), 20000); 
                     return;
                 }
                 const rootData = await response.json();
@@ -521,11 +531,34 @@
                     btcBadge.innerText = `⚠️ ${btc.reason}`;
                 }
 
-                const isFirstLoad = globalCachedData.length === 0;
-                globalCachedData = rootData.market || [];
+                const serverCoins = rootData.market || [];
 
-                if (isFirstLoad) {
+                // Sinkronisasi data tanpa merusak data harga live milik WebSocket yang sudah berjalan
+                if (globalCachedData.length === 0 || forceRender || globalCachedData.length !== serverCoins.length) {
+                    globalCachedData = serverCoins;
                     renderTableRows(globalCachedData);
+                } else {
+                    // Update metadata strategis non-harga dari backend ke global cache secara perlahan
+                    serverCoins.forEach(srvCoin => {
+                        let localCoin = globalCachedData.find(c => c.koin === srvCoin.koin);
+                        if (localCoin) {
+                            localCoin.fase = srvCoin.fase;
+                            localCoin.skor = srvCoin.skor;
+                            localCoin.whale = srvCoin.whale;
+                            localCoin.rasio = srvCoin.rasio;
+                            localCoin.tren_pendek = srvCoin.tren_pendek;
+                            localCoin.tren_panjang = srvCoin.tren_panjang;
+                            localCoin.probabilitas_prediksi = srvCoin.probabilitas_prediksi;
+                            localCoin.saran_entry = srvCoin.saran_entry;
+                            localCoin.tp = srvCoin.tp;
+                            localCoin.cl = srvCoin.cl;
+                            localCoin.proyeksi_bawah = srvCoin.proyeksi_bawah;
+                            localCoin.proyeksi_atas = srvCoin.proyeksi_atas;
+                            
+                            // Perbarui visual khusus kolom analisis struktural & target
+                            updateSingleRowDOM(localCoin);
+                        }
+                    });
                 }
 
                 initBinanceWebSocket(globalCachedData);
@@ -540,10 +573,10 @@
                 document.getElementById('sync-status').innerText = 'CORE CONNECTION LOST (RETRYING)';
             }
 
-            setTimeout(updateDashboardData, 20000);
+            setTimeout(() => updateDashboardData(false), 20000);
         }
 
-        updateDashboardData();
+        updateDashboardData(true); // Muat penuh pada peluncuran awal halaman
     </script>
 </body>
 </html>
