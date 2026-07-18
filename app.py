@@ -6,9 +6,8 @@ import httpx
 import asyncio
 import numpy as np
 import nest_asyncio
-from asgiref.wsgi import WsgiToAsgi
 
-# Pengaman mutlak agar pipeline async tetap berjalan di dalam worker sync Gunicorn
+# Pengaman mutlak agar pipeline async tetap berjalan di dalam thread Gunicorn
 nest_asyncio.apply()
 
 # Inisialisasi loop global agar persisten dan efisien
@@ -25,7 +24,9 @@ from services.binance_service import (
 from services.engine import process_single_coin_pipeline, hitung_matriks_atr_dinamis
 from services.telegram_service import send_telegram_in_worker_thread
 
-flask_app = Flask(__name__)
+# PERBAIKAN UTAMA: Menggunakan objek Flask murni (WSGI) tanpa pembungkus WsgiToAsgi
+# Ini akan menyelesaikan TypeError: WsgiToAsgi.__call__() missing 1 required positional argument: 'send'
+app = Flask(__name__)
 
 class GlobalStateManager:
     """Mengelola data global terbagi menggunakan pengaman Thread Lock."""
@@ -84,7 +85,6 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
 
             # 2. Get Combined Ticker Data
             with state.lock:
-                # Perbaikan 1: Ambil potret portofolio default agar tidak mencampuradukkan perangkat
                 dev_key = target_device_id if target_device_id else "default_guest_device"
                 portfolio_snapshot = copy.deepcopy(state.portfolio_dynamics.get(dev_key, {}))
                 
@@ -125,7 +125,6 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
             print(f"Error during core scan execution: {e}")
 
 def run_loop_in_bg():
-    # Perbaikan 3: Gunakan sub-loop terisolasi yang melekat pada thread utama agar tidak re-create event loop
     asyncio.set_event_loop(loop)
     while True:
         try:
@@ -134,18 +133,18 @@ def run_loop_in_bg():
             print(f"Background Loop Error: {e}")
         time.sleep(30)  
 
-@flask_app.before_request
+@app.before_request
 def trigger_engine_startup():
     global ENGINE_INITIALIZED
     if not ENGINE_INITIALIZED:
         Thread(target=run_loop_in_bg, daemon=True).start()
         ENGINE_INITIALIZED = True
 
-@flask_app.route('/')
+@app.route('/')
 def index(): 
     return render_template('index.html')
 
-@flask_app.route('/api/data', methods=['POST'])
+@app.route('/api/data', methods=['POST'])
 def get_data():
     req = request.json or {}
     device_id = req.get("device_id", "default_guest_device")
@@ -194,7 +193,6 @@ def get_data():
 
                 current_peak = 0.0
                 if item["entry"] > 0 and item["amount"] > 0:
-                    # Perbaikan 2: Fungsi dipanggil dengan proteksi teratur untuk mencegah tabrakan data internal thread
                     current_peak = state.update_trailing_peak(device_id, coin, item["entry"], item["harga"])
 
                 if item["entry"] > 0 and item["amount"] > 0:
@@ -262,10 +260,10 @@ def get_data():
         }), 200
 
     except Exception as e:
-        flask_app.logger.error(f"Error executing quantitative data route: {e}")
+        app.logger.error(f"Error executing quantitative data route: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-@flask_app.route('/api/telegram/send_manual', methods=['POST'])
+@app.route('/api/telegram/send_manual', methods=['POST'])
 def send_manual_alert():
     try:
         req = request.json
@@ -296,8 +294,5 @@ def send_manual_alert():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 
-# Ekspos aplikasi sebagai komponen ASGI untuk Gunicorn Uvicorn Worker
-app = WsgiToAsgi(flask_app)
-
 if __name__ == '__main__':
-    flask_app.run(host='0.0.0.0', port=5000, debug=False)
+    app.run(host='0.0.0.0', port=5000, debug=False)
