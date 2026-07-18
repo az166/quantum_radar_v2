@@ -263,7 +263,6 @@
                             cachedCoin.pnl_val = cachedCoin.current_value - initialVal;
                             cachedCoin.pnl_pct = (cachedCoin.pnl_val / initialVal) * 100;
 
-                            // Hanya mengubah status jika siklus perdagangan aktif (bukan watchlist/strong buy awal)
                             if (cachedCoin.status_aksi === "HOLDING" || cachedCoin.status_aksi === "TAKE PROFIT" || cachedCoin.status_aksi === "CUT LOSS") {
                                 if (livePrice >= cachedCoin.tp) cachedCoin.status_aksi = "TAKE PROFIT";
                                 else if (livePrice <= cachedCoin.cl) cachedCoin.status_aksi = "CUT LOSS";
@@ -289,6 +288,22 @@
             const tr = document.getElementById(rowId);
             if (!tr) return;
 
+            // FIX UTAMA: Update kontainer tren di dalam kolom analisis agar tidak hilang saat WS berjalan
+            const trendContainer = tr.querySelector('.cell-trend-analysis');
+            if (trendContainer) {
+                let shortTrend = coin.tren_pendek || "SCANNING";
+                let longTrend = coin.tren_panjang || "ANALYZING";
+                let probabilitasStr = coin.probabilitas_prediksi || "50.0%";
+
+                let shortTrendColor = shortTrend.includes("BULLISH") ? 'text-emerald-400' : shortTrend.includes("BEARISH") ? 'text-rose-400' : 'text-slate-400';
+                let longTrendColor = longTrend.includes("BULLISH") ? 'text-emerald-400' : longTrend.includes("BEARISH") ? 'text-rose-400' : 'text-slate-400';
+
+                trendContainer.innerHTML = `
+                    <div class="text-slate-400 truncate">ST: <span class="${shortTrendColor} font-bold">${shortTrend}</span> <span class="text-slate-600">(${probabilitasStr})</span></div>
+                    <div class="text-slate-400 truncate">LT: <span class="${longTrendColor} font-bold">${longTrend}</span></div>
+                `;
+            }
+
             // 1. Perbarui Kolom Harga & Persen Live
             const priceTd = tr.querySelector('.cell-live-price');
             if (priceTd) {
@@ -300,7 +315,7 @@
                 `;
             }
 
-            // 2. Perbarui Kolom Plan Status (Disinkronkan dengan Modul v4 - Fix Variabel Scope)
+            // 2. Perbarui Kolom Plan Status
             const statusSpan = tr.querySelector('.cell-plan-status span');
             if (statusSpan) {
                 let statusBadgeClass = 'border-gray-800 text-gray-400';
@@ -313,7 +328,7 @@
                 statusSpan.innerText = `● ${coin.status_aksi}`;
             }
 
-            // 3. Perbarui Kolom Progress Bar & PnL Akurat (Fix Variabel dari cachedCoin -> coin)
+            // 3. Perbarui Kolom Progress Bar & PnL Akurat
             const performanceTd = tr.querySelector('.cell-performance');
             if (performanceTd && coin.is_portfolio && coin.entry > 0) {
                 let progressPct = 0;
@@ -372,12 +387,12 @@
                     faseLabel = "❌ " + faseLabel;
                 }
 
-                let trendLabel = coin.prediksi_tren || "CALCULATING TENDENCY";
-                let trendColorClass = 'text-slate-400';
-                if (trendLabel.includes("BULLISH")) trendColorClass = 'text-emerald-400 font-semibold';
-                if (trendLabel.includes("BEARISH")) trendColorClass = 'text-rose-400 font-semibold';
-                
+                let shortTrend = coin.tren_pendek || "SCANNING";
+                let longTrend = coin.tren_panjang || "ANALYZING";
                 let probabilitasStr = coin.probabilitas_prediksi || "50.0%";
+
+                let shortTrendColor = shortTrend.includes("BULLISH") ? 'text-emerald-400' : shortTrend.includes("BEARISH") ? 'text-rose-400' : 'text-slate-400';
+                let longTrendColor = longTrend.includes("BULLISH") ? 'text-emerald-400' : longTrend.includes("BEARISH") ? 'text-rose-400' : 'text-slate-400';
 
                 let progressPct = 0;
                 if (coin.tp > coin.entry && coin.harga >= coin.entry) {
@@ -433,7 +448,7 @@
                 }
 
                 rowsHtml += `
-                    <tr id="row-coin-${coin.koin}" class="${isPortfolioStyle} hover:bg-gray-900/40 transition border-b border-gray-900 h-20">
+                    <tr id="row-coin-${coin.koin}" class="${isPortfolioStyle} hover:bg-gray-900/40 transition border-b border-gray-900 min-h-[6rem]">
                         <td class="p-4 overflow-hidden">
                             <div class="flex items-center gap-1.5 w-full">
                                 <span class="text-xs flex-shrink-0">${coin.is_portfolio ? '⚡' : '🔍'}</span>
@@ -442,9 +457,12 @@
                                 <span class="text-[10px] bg-indigo-950/40 text-indigo-400 border border-indigo-900 px-1 rounded font-mono flex-shrink-0">W:${coin.whale}%</span>
                                 <span class="text-[10px] bg-cyan-950/50 text-cyan-400 border border-cyan-900 px-1 rounded font-mono flex-shrink-0">S:${coin.skor}</span>
                             </div>
-                            <div class="text-xs ${faseColorClass} mt-1 uppercase tracking-wider font-semibold truncate" title="${faseLabel}">${faseLabel}</div>
-                            <div class="text-[11px] ${trendColorClass} mt-0.5 truncate" title="Prediction: ${trendLabel} (${probabilitasStr})">
-                                🔮 ${trendLabel} <span class="text-slate-500">(${probabilitasStr})</span>
+                            <div class="text-xs ${faseColorClass} mt-0.5 uppercase tracking-wider font-semibold truncate" title="${faseLabel}">${faseLabel}</div>
+                            
+                            <!-- Ditambahkan kelas penanda 'cell-trend-analysis' agar dicari oleh fungsi WebSocket -->
+                            <div class="cell-trend-analysis text-[11px] mt-0.5 space-y-0.5">
+                                <div class="text-slate-400 truncate">ST: <span class="${shortTrendColor} font-bold">${shortTrend}</span> <span class="text-slate-600">(${probabilitasStr})</span></div>
+                                <div class="text-slate-400 truncate">LT: <span class="${longTrendColor} font-bold">${longTrend}</span></div>
                             </div>
                         </td>
                         <td class="p-4 font-mono overflow-hidden cell-live-price">
