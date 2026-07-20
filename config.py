@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 
 # Set pencarian cepat O(1) untuk menyaring koin hitam (Blacklist)
-COIN_BLACKLIST = {'UPUSDT', 'DOWNUSDT', 'BUSDUSDT', 'USDCUSDT', 'FDUSDUSDT', 'EURUSDT', 'USD1USDT'}
+COIN_BLACKLIST = {'UPUSDT', 'DOWNUSDT', 'BUSDUSDT', 'USDCUSDT', 'FDUSDUSDT', 'EURUSDT', 'USD1USDT', 'RLUSDUSDT'}
 
 # Memuat variabel dari file .env
 load_dotenv()
