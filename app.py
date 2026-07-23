@@ -58,17 +58,32 @@ class GlobalStateManager:
             self.trailing_peaks[device_id][coin_name] = current_peak
             return current_peak
 
+    def get_all_custom_coins(self):
+        """Mengumpulkan seluruh koin kustom dari seluruh perangkat yang terdaftar (dinormalisasi ke simbol USDT)."""
+        with self.lock:
+            custom_coins = set()
+            for portfolio in self.portfolio_dynamics.values():
+                for coin in portfolio.keys():
+                    if coin:
+                        clean_coin = coin.strip().upper()
+                        # Normalisasi: hapus USDT jika ada, lalu tambahkan kembali agar konsisten
+                        if clean_coin.endswith("USDT"):
+                            clean_coin = clean_coin[:-4]
+                        custom_coins.add(f"{clean_coin}USDT")
+            return list(custom_coins)
+
 state = GlobalStateManager()
 ENGINE_INITIALIZED = False
 STARTUP_LOCK = Lock()  # Pengaman ekstra untuk mencegah balapan thread saat inisialisasi
 
 async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False):
+    # Timeout ditingkatkan ke 12 detik untuk mengakomodasi penambahan koin kustom
     async with httpx.AsyncClient(
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
-        timeout=httpx.Timeout(5.0)
+        timeout=httpx.Timeout(12.0)
     ) as brass_client:
         try:
-            semaphore = asyncio.Semaphore(4)  
+            semaphore = asyncio.Semaphore(10)  
 
             # 1. Update BTC Circuit Breaker
             btc_status, btc_returns = await check_bitcoin_circuit_breaker(brass_client)
@@ -76,12 +91,18 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
                 state.btc_status = btc_status
                 state.btc_returns = btc_returns
 
-            # 2. Get Combined Ticker Data
+            # 2. Ekstraksi portofolio gabungan untuk mendukung koin kustom
+            dev_key = target_device_id if target_device_id else "default_guest_device"
             with state.lock:
-                dev_key = target_device_id if target_device_id else "default_guest_device"
                 portfolio_snapshot = copy.deepcopy(state.portfolio_dynamics.get(dev_key, {}))
 
-            ticker_master_data, prices_update = await get_combined_tickers_data_async(brass_client, portfolio_snapshot)
+            # 3. Ambil data koin bawaan + Koin kustom pilihan pengguna
+            custom_coins_list = state.get_all_custom_coins()
+            ticker_master_data, prices_update = await get_combined_tickers_data_async(
+                brass_client, 
+                portfolio_snapshot, 
+                extra_symbols=custom_coins_list
+            )
 
             if not ticker_master_data:
                 return
@@ -97,6 +118,7 @@ async def execute_one_market_scan(target_device_id=None, minimal_bootstrap=False
                 if target_device_id and target_device_id in state.portfolio_dynamics:
                     active_portfolio = dict(state.portfolio_dynamics[target_device_id])
 
+            # 4. Jalankan pipeline untuk Top 50 + Koin Kustom secara paralel
             tasks = [
                 process_single_coin_pipeline(brass_client, symbol, m_data, active_portfolio, semaphore, state, dev_key) 
                 for symbol, m_data in ticker_master_data.items()
@@ -133,7 +155,6 @@ def trigger_engine_startup():
     global ENGINE_INITIALIZED
     if not ENGINE_INITIALIZED:
         with STARTUP_LOCK:
-            # Pengecekan ganda di dalam lock untuk memastikan keamanan mutlak mutasi variabel
             if not ENGINE_INITIALIZED:
                 Thread(target=run_loop_in_bg, daemon=True).start()
                 ENGINE_INITIALIZED = True
@@ -179,19 +200,32 @@ def get_data():
 
         user_market_data = []
 
+        # Normalisasi kunci active_portfolio ke UPPER CASE untuk mencegah miss matching
+        normalized_active_portfolio = {
+            k.strip().upper(): v for k, v in active_portfolio.items()
+        }
+
         for original_item in cache_snapshot:
             item = copy.deepcopy(original_item)  
-            coin = item["koin"]
+            coin_raw = item["koin"].strip().upper()
+            # Dukungan pencocokan baik dengan "BTC" maupun "BTCUSDT"
+            coin_clean = coin_raw[:-4] if coin_raw.endswith("USDT") else coin_raw
 
-            if coin in active_portfolio:
+            matched_key = None
+            if coin_raw in normalized_active_portfolio:
+                matched_key = coin_raw
+            elif coin_clean in normalized_active_portfolio:
+                matched_key = coin_clean
+
+            if matched_key:
                 item["is_portfolio"] = True
-                coin_p_data = active_portfolio[coin]
+                coin_p_data = normalized_active_portfolio[matched_key]
                 item["amount"] = coin_p_data.get("amount", 0.0)
                 item["entry"] = coin_p_data.get("costPrice", 0.0)
 
                 current_peak = 0.0
                 if item["entry"] > 0 and item["amount"] > 0:
-                    current_peak = state.update_trailing_peak(device_id, coin, item["entry"], item["harga"])
+                    current_peak = state.update_trailing_peak(device_id, matched_key, item["entry"], item["harga"])
 
                 if item["entry"] > 0 and item["amount"] > 0:
                     dtp, dcl = hitung_matriks_atr_dinamis(
@@ -208,8 +242,7 @@ def get_data():
                     item["current_value"] = item["amount"] * item["harga"]
                     initial_val = item["amount"] * item["entry"]
                     item["pnl_val"] = item["current_value"] - initial_val
-                    
-                    # Pengaman pembagian nol
+
                     item["pnl_pct"] = (item["pnl_val"] / initial_val) * 100 if initial_val > 0 else 0.0
 
                     if item["harga"] >= item["tp"]: 
@@ -267,8 +300,7 @@ def get_data():
 def send_manual_alert():
     try:
         req = request.json or {}
-        
-        # Ekstraksi seluruh metrik kuantitatif adaptif
+
         coin = req.get("koin", "").strip().upper()
         fase = req.get("fase", "MONITORING")
         harga = float(req.get("harga", 0))
@@ -277,18 +309,16 @@ def send_manual_alert():
         z_score = req.get("z_score", 0.0)
         rasio = float(req.get("rasio", 0))
         whale = req.get("whale", 0)
-        
+
         tren_pendek = req.get("tren_pendek", "SCANNING")
         probabilitas = req.get("probabilitas_prediksi", "50.0%")
         p_bawah = float(req.get("proyeksi_bawah", 0))
         p_atas = float(req.get("proyeksi_atas", 0))
 
-        # Formatter format harga agar rapi
         harga_fmt = f"${harga:.8f}" if harga < 1.0 else f"${harga:.4f}"
         fmt_atas = f"${p_atas:.8f}" if p_atas < 1.0 else f"${p_atas:.4f}"
         fmt_bawah = f"${p_bawah:.8f}" if p_bawah < 1.0 else f"${p_bawah:.4f}"
 
-        # Membuat struktur template pesan identik dengan otomatis
         msg = (
             f"📢 *MANUAL QUANTUM SIGNAL ALERT*\n\n"
             f"Coin: *{coin}*\n"
